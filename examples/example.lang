@@ -1,0 +1,5 @@
+myvar :: Int = 23;
+
+lambda myfun (var1 :: Int, var2 :: Int) {
+    return myfun(3, var2);
+}
