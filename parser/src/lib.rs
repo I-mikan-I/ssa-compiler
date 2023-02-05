@@ -1,17 +1,23 @@
-use std::{fmt::Debug, error::Error};
+use std::{error::Error, fmt::Debug};
 
-pub use self::{Factor::*, Expr::*, Term::*, Factor::*, Statement::*, Defs::*, Type::*};
+pub use self::{
+    Expr::*, Term::*, CTerm::*, Factor::*, Atom::*, Unit::*, Defs::*, Statement::*,
+    Type::*,
+};
 pub fn do_nothing() {}
 pub struct ParseErr {
     message: Box<dyn Error>,
-    span: Option<lrpar::Span>
+    span: Option<lrpar::Span>,
 }
 impl<E> From<E> for ParseErr
 where
     E: Into<Box<dyn Error>>,
 {
     fn from(v: E) -> Self {
-        Self { message: v.into(), span: None }
+        Self {
+            message: v.into(),
+            span: None,
+        }
     }
 }
 impl Debug for ParseErr {
@@ -23,25 +29,48 @@ pub type Ident = String;
 #[derive(Debug)]
 pub enum Type {
     Int,
+    Bool
 }
 #[derive(Debug)]
 pub enum Expr {
-    Plus(Box<Expr>, Term),
-    Minus(Box<Expr>, Term),
+    Or(Box<Expr>, Term),
+    Xor(Box<Expr>, Term),
     ETerm(Term)
 }
 #[derive(Debug)]
 pub enum Term {
-    Mult(Box<Term>, Factor),
-    Div(Box<Term>, Factor),
-    TFactor(Factor)
+    And(Box<Term>, CTerm),
+    TCTerm(CTerm)
+}
+#[derive(Debug)]
+pub enum CTerm {
+    GEq(Box<CTerm>, Factor),
+    LT(Box<CTerm>, Factor),
+    EQ(Box<CTerm>, Factor),
+    CTFactor(Factor)
 }
 #[derive(Debug)]
 pub enum Factor {
-    FIdent(Ident),
-    Number(i64),
-    Call(Ident, Args),
+    Plus(Box<Factor>, Atom),
+    Minus(Box<Factor>, Atom),
+    FAtom(Atom),
 }
+#[derive(Debug)]
+pub enum Atom {
+    Mult(Box<Atom>, Unit),
+    Div(Box<Atom>, Unit),
+    AUnit(Unit)
+}
+#[derive(Debug)]
+pub enum Unit {
+    Identifier(Ident),
+    True,
+    False,
+    Call(Ident, Args),
+    Grouping(Box<Expr>),
+    Number(i64)
+}
+
 #[derive(Debug)]
 pub struct Parameter(pub Ident, pub Type);
 #[derive(Debug)]
@@ -67,9 +96,10 @@ pub enum Defs {
 pub struct Program(pub Vec<Defs>);
 
 pub fn append<U, E>(lhs: Result<Vec<U>, E>, rhs: Result<U, E>) -> Result<Vec<U>, ParseErr>
- where E: Into<ParseErr> + Debug + 'static,
+where
+    E: Into<ParseErr> + Debug + 'static,
 {
-    let mut lhs_ : Vec<U> = lhs.map_err(|err| err.into())?;
+    let mut lhs_: Vec<U> = lhs.map_err(|err| err.into())?;
     lhs_.push(rhs.map_err(|err| err.into())?);
     Ok(lhs_)
 }

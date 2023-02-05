@@ -1,10 +1,17 @@
+use std::error::Error;
+
 use lrlex::{lrlex_mod, DefaultLexerTypes};
 use lrpar::{lrpar_mod, LexParseError};
 use parser_defs::{ParseErr, Program};
 lrlex_mod!("language.l");
 lrpar_mod!("language.y");
 
-pub fn parse(
+fn validate(program: &parser_defs::Program) -> Option<Box<dyn Error>> {
+    
+    todo!()
+}
+
+fn parse(
     s: &str,
 ) -> (
     Option<Result<Program, ParseErr>>,

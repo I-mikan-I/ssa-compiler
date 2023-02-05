@@ -41,34 +41,71 @@ ParamList -> Result<Vec<Parameter>, ParseErr> :
     | ParamList ',' Identifier '::' Type {
         append($1, Ok(Parameter($3?, $5?)))
     } ;
-Factor -> Result<Factor, ParseErr> :
+Unit -> Result<Unit, ParseErr> :
     Number {
         Ok(Number($1?))
     }
     | Identifier {
-        Ok(FIdent($1?))
+        Ok(Identifier($1?))
     }
     | Identifier Arguments  {
         Ok(Call($1?, $2?))
+    }
+    | "(" Expr ")" {
+        Ok(Grouping($2?.into()))
+    }
+    | "TRUE" {
+        Ok(True)
+    }
+    | "FALSE" {
+        Ok(False)
     } ;
-
-Term -> Result<Term, ParseErr> :
-    Term '*' Factor {
+Atom -> Result<Atom, ParseErr> :
+    Atom '*' Unit {
         Ok(Mult($1?.into(), $3?.into()))
     }
-    | Term '/' Factor {
+    | Atom '/' Unit {
         Ok(Div($1?.into(), $3?.into()))
     }
-    | Factor {
-        Ok(TFactor($1?))
+    | Unit {
+        Ok(AUnit($1?))
     } ;
-
-Expr -> Result<Expr, ParseErr> :
-    Expr '+' Term {
+Factor -> Result<Factor, ParseErr> :
+    Factor '+' Atom {
         Ok(Plus($1?.into(), $3?))
     }
-    | Expr '-' Term {
+    | Factor '-' Atom {
         Ok(Minus($1?.into(), $3?))
+    }
+    | Atom {
+        Ok(FAtom($1?))
+    } ;
+CTerm -> Result<CTerm, ParseErr> :
+    CTerm ">=" Factor {
+        Ok(GEq($1?.into(), $3?))
+    }
+    | CTerm "<" Factor {
+        Ok(LT($1?.into(), $3?))
+    }
+    | CTerm "==" Factor {
+        Ok(EQ($1?.into(), $3?))
+    }
+    | Factor {
+        Ok(CTFactor($1?))
+    } ;
+Term -> Result<Term, ParseErr> :
+    Term "AND" CTerm {
+        Ok(And($1?.into(), $3?))
+    }
+    | CTerm {
+        Ok(TCTerm($1?))
+    } ;
+Expr -> Result<Expr, ParseErr>  :
+    Expr "OR" Term {
+        Ok(Or($1?.into(), $3?))
+    }
+    | Expr "XOR" Term {
+        Ok(Xor($1?.into(), $3?))
     }
     | Term {
         Ok(ETerm($1?))
@@ -76,6 +113,9 @@ Expr -> Result<Expr, ParseErr> :
 Type -> Result<Type, ParseErr> :
     'INT' {
         Ok(Int)
+    }
+    | 'BOOL' {
+        Ok(Bool)
     } ;
 VarDef -> Result<Defs, ParseErr> :
     Identifier '::' Type '=' Expr ';' {
@@ -94,7 +134,7 @@ Statement -> Result<Statement, ParseErr> :
     | Identifier '=' Expr ';' {
         Ok(Assign($1?, $3?))
     }
-    | 'IF' Expr "THEN" Body "ELSE" Body {
+    | 'IF' Expr 'THEN' Body 'ELSE' Body {
         Ok(IfElse($2?, $4?, $6?))
     }
     | 'WHILE' Expr 'DO' Body {
