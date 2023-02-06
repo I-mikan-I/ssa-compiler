@@ -10,7 +10,7 @@ call = identifier argument_list ;
 
 type = "Int" | "Bool"
 
-function_def = "lambda " identifier parameter_list body;
+function_def = "lambda " identifier parameter_list "::" type body;
 parameter_list = "(" [identifier "::" type] {"," identifier "::" type} ")" ;
 argument_list = "(" [expr] {"," expr} ")" ;
 body = "{" [stmt] {";" stmt} "}" ;
@@ -28,7 +28,9 @@ return = "return" expr ;
 expr = expr "or" expr
     | expr "xor" expr
     | term ;
-term = term "and" cterm
+term = term "and" bterm
+    | bterm ;
+bterm = "not" cterm
     | cterm ;
 cterm = cterm ">=" factor
     | cterm "<" factor

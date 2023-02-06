@@ -93,11 +93,18 @@ CTerm -> Result<CTerm, ParseErr> :
     | Factor {
         Ok(CTFactor($1?))
     } ;
-Term -> Result<Term, ParseErr> :
-    Term "AND" CTerm {
-        Ok(And($1?.into(), $3?))
+BTerm -> Result<BTerm, ParseErr> :
+    'NOT' CTerm {
+        Ok(Not($2?))
     }
     | CTerm {
+        Ok(BCTerm($1?))
+    } ;
+Term -> Result<Term, ParseErr> :
+    Term "AND" BTerm {
+        Ok(And($1?.into(), $3?))
+    }
+    | BTerm {
         Ok(TCTerm($1?))
     } ;
 Expr -> Result<Expr, ParseErr>  :
@@ -151,8 +158,8 @@ StatementList -> Result<Vec<Statement>, ParseErr> :
         append($1, $2)
     } ;
 FunctionDef -> Result<Defs, ParseErr> :
-    'LAMBDA' Identifier Parameters Body {
-        Ok(FunctionDef($2?, $3?, $4?))
+    'LAMBDA' Identifier Parameters '::' Type Body {
+        Ok(FunctionDef($2?, $3?, $5?, $6?))
     } ;
 DefList -> Result<Vec<Defs>, ParseErr> :
     VarDef {

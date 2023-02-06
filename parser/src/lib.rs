@@ -1,8 +1,8 @@
-use std::{error::Error, fmt::Debug};
+use std::{error::Error, fmt::{Debug, Display}};
 
 pub use self::{
-    Expr::*, Term::*, CTerm::*, Factor::*, Atom::*, Unit::*, Defs::*, Statement::*,
-    Type::*,
+    Atom::*, BTerm::*, CTerm::*, Defs::*, Expr::*, Factor::*, Statement::*, Term::*, Type::*,
+    Unit::*,
 };
 pub fn do_nothing() {}
 pub struct ParseErr {
@@ -25,29 +25,40 @@ impl Debug for ParseErr {
         write!(f, "{}", self.message)
     }
 }
+impl Display for Type {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        <Self as Debug>::fmt(self, f)
+    }
+}
 pub type Ident = String;
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Type {
     Int,
-    Bool
+    Bool,
+    Never,
 }
 #[derive(Debug)]
 pub enum Expr {
     Or(Box<Expr>, Term),
     Xor(Box<Expr>, Term),
-    ETerm(Term)
+    ETerm(Term),
 }
 #[derive(Debug)]
 pub enum Term {
-    And(Box<Term>, CTerm),
-    TCTerm(CTerm)
+    And(Box<Term>, BTerm),
+    TCTerm(BTerm),
+}
+#[derive(Debug)]
+pub enum BTerm {
+    Not(CTerm),
+    BCTerm(CTerm),
 }
 #[derive(Debug)]
 pub enum CTerm {
     GEq(Box<CTerm>, Factor),
     LT(Box<CTerm>, Factor),
     EQ(Box<CTerm>, Factor),
-    CTFactor(Factor)
+    CTFactor(Factor),
 }
 #[derive(Debug)]
 pub enum Factor {
@@ -59,7 +70,7 @@ pub enum Factor {
 pub enum Atom {
     Mult(Box<Atom>, Unit),
     Div(Box<Atom>, Unit),
-    AUnit(Unit)
+    AUnit(Unit),
 }
 #[derive(Debug)]
 pub enum Unit {
@@ -68,7 +79,7 @@ pub enum Unit {
     False,
     Call(Ident, Args),
     Grouping(Box<Expr>),
-    Number(i64)
+    Number(i64),
 }
 
 #[derive(Debug)]
@@ -90,10 +101,29 @@ pub enum Statement {
 #[derive(Debug)]
 pub enum Defs {
     VarDef(Ident, Type, Expr),
-    FunctionDef(Ident, Params, Body),
+    FunctionDef(Ident, Params, Type, Body),
 }
 #[derive(Debug)]
 pub struct Program(pub Vec<Defs>);
+
+#[derive(Debug)]
+pub enum Any<'a> {
+    Ty(&'a Type),
+    E(&'a Expr),
+    S(&'a Statement),
+    D(&'a Defs),
+    B(&'a Body),
+    As(&'a Args),
+    Ps(&'a Params),
+    P(&'a Parameter),
+    A(&'a Atom),
+    U(&'a Unit),
+    F(&'a Factor),
+    BT(&'a BTerm),
+    CT(&'a CTerm),
+    T(&'a Term),
+    PR(&'a Program),
+}
 
 pub fn append<U, E>(lhs: Result<Vec<U>, E>, rhs: Result<U, E>) -> Result<Vec<U>, ParseErr>
 where

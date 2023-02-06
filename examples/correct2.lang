@@ -1,0 +1,12 @@
+
+myvar3 :: Bool = false;
+lambda myfun(myvar3 :: Int) :: Int {
+    myvar4 :: Int = 0;
+    if myvar2 then {
+        myvar4 = myvar3;
+    } else {
+        myvar4 = 33;
+    }
+    return myvar4;
+}
+myvar2 :: Bool = true;

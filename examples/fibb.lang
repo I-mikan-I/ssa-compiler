@@ -1,0 +1,6 @@
+lambda fibb(n :: Int) :: Int {
+    if n < 2 then {
+        return n;
+    } else {}
+    return fibb(n - 2) + fibb(n - 1);
+}

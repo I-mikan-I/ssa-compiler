@@ -13,7 +13,7 @@ impl<K, V> SheafTable<K, V, RandomState> {
     pub fn new() -> Self {
         Self {
             parent: None,
-            current: HashMap::<K, V>::new()
+            current: HashMap::<K, V>::new(),
         }
     }
     pub fn push(&mut self) {

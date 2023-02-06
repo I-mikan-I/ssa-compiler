@@ -1,0 +1,6 @@
+lambda myfun() :: Int {
+    while true do {
+        myvar :: Int = 0;
+    }
+    return myvar;
+}

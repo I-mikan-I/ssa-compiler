@@ -1,0 +1,11 @@
+lambda odd(n::Int) :: Bool {
+    return even(n - 1);
+}
+
+lambda even(n::Int) :: Bool {
+    if n == 0 then {
+        return true;
+    } else {
+        return odd(n - 1);
+    }
+}
