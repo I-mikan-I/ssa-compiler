@@ -37,7 +37,7 @@ where
                 if l == Bool && r == Bool {
                     Ok(Bool)
                 } else {
-                    Err(format!("'OR': Type mismatch. Expected: Bool. Got: {l}, {r}").into())
+                    Err(format!("'OR': Type mismatch. Expected: Bool. Got: {l}, {r}.").into())
                 }
             }
             parser_defs::Expr::ETerm(t) => resolution(Any::T(t), state),
@@ -51,10 +51,10 @@ where
                     if t == te {
                         Ok(t)
                     } else {
-                        Err(format!("'=': Type mismatch. Expected: {t}. Got: {te}").into())
+                        Err(format!("'=': Type mismatch. Expected: {t}. Got: {te}.").into())
                     }
                 } else {
-                    Err(format!("Undeclared variable {l}").into())
+                    Err(format!("Undeclared variable {l}.").into())
                 }
             }
             parser_defs::Statement::IfElse(c, t, e) => {
@@ -85,7 +85,7 @@ where
                         return Ok(Type::Never);
                     }
                 }
-                Err("'RETURN': Type mismatch".to_string().into())
+                Err("'RETURN': Type mismatch.".to_string().into())
             }
         },
         parser_defs::Any::D(d) => match d {
@@ -93,7 +93,10 @@ where
                 if state.get(i.as_str()).is_some() {
                     Err(format!("Dual declaration for {i}").into())
                 } else {
-                    resolution(Any::E(e), state)?;
+                    let te = resolution(Any::E(e), state)?;
+                    if te != *t {
+                        return Err(format!("'=': Type mismatch. Expected: {t}. Got: {te}.").into());
+                    }
                     state.insert(i, ResolutionState::Variable(*t));
                     Ok(Never)
                 }
@@ -125,7 +128,7 @@ where
                 if l == Type::Int && r == Type::Int {
                     Ok(Type::Int)
                 } else {
-                    Err(format!("'*//': Type mismatch. Expected: Int. Got: {l}, {r}").into())
+                    Err(format!("'*//': Type mismatch. Expected: Int. Got: {l}, {r}.").into())
                 }
             }
             parser_defs::Atom::AUnit(u) => resolution(Any::U(u), state),
@@ -135,7 +138,7 @@ where
                 if let Some(ResolutionState::Variable(t)) = state.get(i.as_str()) {
                     Ok(*t)
                 } else {
-                    Err(format!("Undeclared variable {i}").into())
+                    Err(format!("Undeclared variable {i}.").into())
                 }
             }
             parser_defs::Unit::Call(i, a) => {
@@ -148,7 +151,7 @@ where
                                 let ta = resolution(Any::E(e), state)?;
                                 if ta != p.1 {
                                     Err(format!(
-                                        "'CALL': Typ mismatch. Expected: {}. Got: {ta}",
+                                        "'CALL': Typ mismatch. Expected: {}. Got: {ta}.",
                                         p.1
                                     )
                                     .into())
@@ -159,10 +162,10 @@ where
                             .find(|res| res.is_err())
                             .unwrap_or(Ok(t))
                     } else {
-                        Err(format!("Wrong number of arguments in call to {i}").into())
+                        Err(format!("Wrong number of arguments in call to {i}.").into())
                     }
                 } else {
-                    Err(format!("Undeclared function {i}").into())
+                    Err(format!("Undeclared function {i}.").into())
                 }
             }
             parser_defs::Unit::Grouping(e) => resolution(Any::E(e), state),
@@ -176,7 +179,7 @@ where
                 if l == Type::Int && r == Type::Int {
                     Ok(Type::Int)
                 } else {
-                    Err(format!("'+/-': Type mismatch. Expected: Int. Got: {l}, {r}").into())
+                    Err(format!("'+/-': Type mismatch. Expected: Int. Got: {l}, {r}.").into())
                 }
             }
             parser_defs::Factor::FAtom(a) => resolution(Any::A(a), state),
@@ -190,7 +193,7 @@ where
                 if l == Type::Int && r == Type::Int {
                     Ok(Type::Bool)
                 } else {
-                    Err(format!("'>=/</==': Type mismatch. Expected: Int. Got: {l}, {r}").into())
+                    Err(format!("'>=/</==': Type mismatch. Expected: Int. Got: {l}, {r}.").into())
                 }
             }
             parser_defs::CTerm::CTFactor(f) => resolution(Any::F(f), state),
@@ -202,7 +205,7 @@ where
                 if l == Type::Bool && r == Type::Bool {
                     Ok(Type::Bool)
                 } else {
-                    Err(format!("'AND': Type mismatch. Expected: Bool. Got: {l}, {r}").into())
+                    Err(format!("'AND': Type mismatch. Expected: Bool. Got: {l}, {r}.").into())
                 }
             }
             parser_defs::Term::TCTerm(ct) => resolution(Any::BT(ct), state),
@@ -211,7 +214,7 @@ where
             parser_defs::BTerm::Not(ct) => {
                 let t = resolution(Any::CT(ct), state)?;
                 if t != Bool {
-                    Err(format!("'NOT': Type mismatch. Expected: Bool. Got: {t}").into())
+                    Err(format!("'NOT': Type mismatch. Expected: Bool. Got: {t}.").into())
                 } else {
                     Ok(Bool)
                 }
@@ -299,6 +302,14 @@ mod tests {
         };
     }
 
-    expect_correct!("examples", correct2, example, fibb, recurse);
-    expect_wrong_semantics!("examples", wrong1, wrong_type1);
+    expect_correct!("examples", correct2, example, fibb, recurse, correct3);
+    expect_wrong_semantics!(
+        "examples",
+        wrong1,
+        wrong_type1,
+        wrong2,
+        wrong_type2,
+        wrong_type3,
+        wrong_type4
+    );
 }

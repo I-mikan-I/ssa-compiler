@@ -1,0 +1,6 @@
+lambda myfun() :: Int {
+    while 3 do {
+
+    }
+    return 0;
+}

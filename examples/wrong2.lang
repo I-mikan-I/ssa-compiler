@@ -1,0 +1,6 @@
+lambda fun1(arg1::Bool) :: Int {
+    return fun2();
+    lambda fun2() :: Int {
+        return 3;
+    }
+}

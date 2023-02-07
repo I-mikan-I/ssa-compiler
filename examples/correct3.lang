@@ -1,0 +1,6 @@
+lambda fun1() :: Int {
+    lambda fun2() :: Int {
+        return 5;
+    }
+    return fun2();
+}
