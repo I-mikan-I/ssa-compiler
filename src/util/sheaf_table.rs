@@ -69,4 +69,13 @@ where
             .remove(k)
             .or_else(|| self.parent.as_deref_mut().and_then(|p| p.remove(k)))
     }
+    pub fn get_key_value<Q>(&self, k: &Q) -> Option<(&K, &V)>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.current
+            .get_key_value(k)
+            .or_else(|| self.parent.as_deref().and_then(|p| p.get_key_value(k)))
+    }
 }

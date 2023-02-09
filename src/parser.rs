@@ -11,7 +11,7 @@ use crate::util::SheafTable;
 lrlex_mod!("language.l");
 lrpar_mod!("language.y");
 
-fn validate(program: &parser_defs::Program) -> Option<Box<dyn Error>> {
+pub fn validate(program: &parser_defs::Program) -> Option<Box<dyn Error>> {
     let mut sheaf = SheafTable::new();
     resolution(parser_defs::Any::PR(program), &mut sheaf).err()
 }
@@ -250,7 +250,7 @@ where
     }
 }
 
-fn parse(
+pub fn parse(
     s: &str,
 ) -> (
     Option<Result<Program, ParseErr>>,

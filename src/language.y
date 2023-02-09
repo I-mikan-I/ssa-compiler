@@ -137,7 +137,6 @@ Body -> Result<Body, ParseErr> :
     } ;
 Statement -> Result<Statement, ParseErr> :
     VarDef {Ok(Def($1?))}
-    | FunctionDef {Ok(Def($1?))}
     | Identifier '=' Expr ';' {
         Ok(Assign($1?, $3?))
     }

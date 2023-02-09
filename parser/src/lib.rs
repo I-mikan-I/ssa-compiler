@@ -106,7 +106,7 @@ pub enum Defs {
 #[derive(Debug)]
 pub struct Program(pub Vec<Defs>);
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum Any<'a> {
     Ty(&'a Type),
     E(&'a Expr),

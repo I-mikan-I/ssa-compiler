@@ -15,7 +15,6 @@ parameter_list = "(" [identifier "::" type] {"," identifier "::" type} ")" ;
 argument_list = "(" [expr] {"," expr} ")" ;
 body = "{" [stmt] {";" stmt} "}" ;
 stmt = var_def
-    | function_def
     | assign
     | ifelse
     | while
