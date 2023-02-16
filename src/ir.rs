@@ -88,6 +88,7 @@ use std::{
     rc::Rc,
 };
 
+use crate::ssa::{Linear, SSA};
 use crate::util::SheafTable;
 
 type VReg = u32;
@@ -107,7 +108,7 @@ impl VRegGenerator {
         res
     }
 }
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum Operator {
     Add(VReg, VReg, VReg),
     Sub(VReg, VReg, VReg),
@@ -129,6 +130,7 @@ pub enum Operator {
     Call(VReg, Rc<str>, Vec<VReg>),
     Return(VReg),
     Label(Rc<str>),
+    Nop,
 }
 
 pub struct Displayable<'a>(pub &'a [Operator]);
@@ -171,6 +173,7 @@ impl Display for Operator {
             }
             Operator::Return(rd1) => write!(f, "\treturn rd{rd1}"),
             Operator::Label(rd1) => write!(f, "@{rd1}:"),
+            Operator::Nop => write!(f, "nop"),
         }
     }
 }
@@ -479,3 +482,232 @@ fn translate_block<'a>(
         _ => panic!("Unexpected instr"),
     }
 }
+
+pub struct IRLinear(Function);
+impl IRLinear {
+    pub fn get_mut(&mut self) -> &mut Function {
+        &mut self.0
+    }
+}
+pub struct IRSSA(Function);
+impl SSA for IRSSA {
+    type Operation = Operator;
+
+    type LinearReg = VReg;
+
+    type SSAReg = VReg;
+}
+
+impl Linear for IRLinear {
+    type Operation = Operator;
+
+    type LinearReg = VReg;
+
+    type SSaReg = VReg;
+
+    type AsSSA = IRSSA;
+
+    fn transpile_ssa(&self) -> Self::AsSSA {
+        todo!()
+    }
+}
+
+#[derive(Debug)]
+struct Block {
+    label: Rc<str>,
+    body: Vec<Operator>,
+    preds: Vec<usize>,
+    children: Vec<usize>,
+    doms: Vec<usize>, // dominator tree
+}
+
+impl Block {
+    pub fn empty(label: &Rc<str>) -> Self {
+        Self {
+            label: Rc::clone(label),
+            body: Vec::new(),
+            preds: Vec::new(),
+            children: Vec::new(),
+            doms: Vec::new(),
+        }
+    }
+}
+#[derive(Debug)]
+struct CFG {
+    blocks: Vec<Block>,
+    entry: usize,
+}
+impl CFG {
+    fn get_block(&self, i: usize) -> &Block {
+        self.blocks.get(i).unwrap()
+    }
+    fn from_linear(code: Vec<Operator>) -> Self {
+        let mut i = 1;
+        let mut labels: HashMap<Rc<str>, usize> = HashMap::new();
+        let mut blocks = Vec::from([Block::empty(&Rc::from("@ENTRY"))]);
+        for op in code.iter() {
+            if let Operator::Label(s) = op {
+                labels.insert(Rc::clone(&s), i);
+                i += 1;
+                blocks.push(Block::empty(&s));
+            }
+        }
+        let mut start = 0;
+        let mut block_idx = 0;
+        for (i, op) in code.iter().enumerate() {
+            match op {
+                Operator::Label(_) => {
+                    let block = &mut blocks[block_idx];
+                    block_idx += 1;
+                    block.body = Vec::from(&code[start..i]);
+                    start = i + 1;
+                }
+                Operator::J(s)
+                | Operator::Beq(_, _, s)
+                | Operator::Bl(_, _, s)
+                | Operator::Bgt(_, _, s) => {
+                    let block = &mut blocks[block_idx];
+                    let target = *labels.get(s.as_ref()).unwrap();
+                    if !block.children.contains(&target) {
+                        block.children.push(target);
+                        blocks[target].preds.push(block_idx);
+                    }
+                }
+                _ => {}
+            }
+            blocks[block_idx].body = Vec::from(&code[start..]);
+        }
+
+        let mut idoms = vec![HashSet::from_iter(0..blocks.len()); blocks.len()];
+        idoms[0] = HashSet::from([0]);
+
+        let mut changed = true;
+        while changed {
+            changed = false;
+
+            for (i, block) in blocks.iter().enumerate() {
+                let mut new: HashSet<_> = if let Some(fst) = block.preds.first() {
+                    block
+                        .preds
+                        .iter()
+                        .map(|n| &idoms[*n])
+                        .fold(idoms[*fst].clone(), |acc, next| {
+                            acc.intersection(next).cloned().collect()
+                        })
+                } else {
+                    HashSet::new()
+                };
+                new.insert(i);
+                if new != idoms[i] {
+                    changed = true;
+                    idoms[i] = new;
+                }
+            }
+        }
+
+        for (i, set) in idoms.into_iter().enumerate() {
+            blocks[i].doms = set.into_iter().collect();
+        }
+
+        Self { blocks, entry: 0 }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::Operator;
+    use super::CFG;
+    use std::rc::Rc;
+
+    #[test]
+    fn build_cfg_jmp() {
+        let l1 = Rc::from("L1");
+        let input = vec![
+            Operator::Nop,
+            Operator::Nop,
+            Operator::J(Rc::clone(&l1)),
+            Operator::Nop,
+            Operator::Label(Rc::clone(&l1)),
+            Operator::Nop,
+            Operator::Nop,
+            Operator::Return(2),
+        ];
+        let output = CFG::from_linear(input);
+        println!("{output:?}")
+    }
+
+    #[test]
+    fn build_cfg_branch() {
+        let l1 = Rc::from("L1");
+        let l2 = Rc::from("L2");
+        let l3 = Rc::from("L3");
+        let header = Rc::from("Header");
+        let input = vec![
+            Operator::Nop,
+            Operator::J(Rc::clone(&header)),
+            Operator::Label(Rc::clone(&header)),
+            Operator::Nop,
+            Operator::Beq(0, 0, Rc::clone(&l1)),
+            Operator::J(Rc::clone(&l2)),
+            Operator::Label(Rc::clone(&l1)),
+            Operator::J(Rc::clone(&l3)),
+            Operator::Nop,
+            Operator::Label(Rc::clone(&l2)),
+            Operator::J(Rc::clone(&l3)),
+            Operator::Nop,
+            Operator::Label(Rc::clone(&l3)),
+            Operator::Return(2),
+        ];
+        let mut output = CFG::from_linear(input);
+        assert_eq!(output.blocks[0].children.len(), 1);
+        assert_eq!(output.blocks[1].children.len(), 2);
+        assert_eq!(output.blocks[2].children.len(), 1);
+        assert_eq!(output.blocks[3].children.len(), 1);
+        assert_eq!(output.blocks[4].children.len(), 0);
+        assert_eq!(output.blocks[4].preds.len(), 2);
+
+        for block in output.blocks.iter_mut() {
+            block.doms.sort();
+        }
+
+        assert_eq!(output.blocks[0].doms, vec![0]);
+        assert_eq!(output.blocks[1].doms, vec![0, 1]);
+        assert_eq!(output.blocks[2].doms, vec![0, 1, 2]);
+        assert_eq!(output.blocks[3].doms, vec![0, 1, 3]);
+        assert_eq!(output.blocks[4].doms, vec![0, 1, 4]);
+        println!("{output:?}")
+    }
+
+    #[test]
+    fn build_cfg_while() {
+        let l1 = Rc::from("L1");
+        let l2 = Rc::from("L2");
+        let input = vec![
+            Operator::Nop,
+            Operator::J(Rc::clone(&l1)),
+            Operator::Label(Rc::clone(&l1)),
+            Operator::Li(33, 0),
+            Operator::Beq(34, 33, Rc::clone(&l2)),
+            Operator::Nop,
+            Operator::J(Rc::clone(&l1)),
+            Operator::Label(Rc::clone(&l2)),
+            Operator::Nop,
+        ];
+        let mut output = CFG::from_linear(input);
+        assert_eq!(output.blocks[0].children.len(), 1);
+        assert_eq!(output.blocks[1].children.len(), 2);
+        assert_eq!(output.blocks[2].children.len(), 0);
+        assert_eq!(output.blocks[1].preds.len(), 2);
+
+        for block in output.blocks.iter_mut() {
+            block.doms.sort();
+        }
+        println!("{output:?}");
+
+        assert_eq!(output.blocks[0].doms, vec![0]);
+        assert_eq!(output.blocks[1].doms, vec![0, 1]);
+        assert_eq!(output.blocks[2].doms, vec![0, 1, 2]);
+    }
+}
+
+//todo: label could be first instr!

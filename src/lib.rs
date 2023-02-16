@@ -1,5 +1,6 @@
 pub mod ir;
 pub mod parser;
+pub mod ssa;
 pub mod util;
 
 #[cfg(test)]
