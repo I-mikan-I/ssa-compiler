@@ -174,8 +174,23 @@ impl Display for Operator {
         }
     }
 }
+pub struct Function {
+    body: Vec<Operator>,
+    params: Vec<VReg>,
+}
+impl Function {
+    pub fn get_body(&self) -> &Vec<Operator> {
+        &self.body
+    }
+    pub fn get_body_mut(&mut self) -> &mut Vec<Operator> {
+        &mut self.body
+    }
+    pub fn get_params(&self) -> &Vec<VReg> {
+        &self.params
+    }
+}
 pub struct Context {
-    functions: HashMap<String, Vec<Operator>>,
+    functions: HashMap<String, Function>,
 }
 impl Context {
     pub fn new() -> Self {
@@ -183,7 +198,7 @@ impl Context {
             functions: HashMap::new(),
         }
     }
-    pub fn get_functions(&self) -> &HashMap<String, Vec<Operator>> {
+    pub fn get_functions(&self) -> &HashMap<String, Function> {
         &self.functions
     }
 }
@@ -221,11 +236,16 @@ fn translate_function<'a>(
 ) {
     if let parser_defs::FunctionDef(i, p, t, b) = function {
         let code = Vec::new();
-        context.functions.insert(i.clone(), code);
+        let mut params = Vec::new();
         for p in p.0.iter() {
-            scope.insert(p.0.as_str().into(), Scope::Local(gen.next_reg()));
+            let reg = gen.next_reg();
+            scope.insert(p.0.as_str().into(), Scope::Local(reg));
+            params.push(reg);
         }
-        let code = context.functions.get_mut(i).unwrap();
+        context
+            .functions
+            .insert(i.clone(), Function { body: code, params });
+        let code = context.functions.get_mut(i).unwrap().get_body_mut();
         translate_block(code, scope, Any::B(b), &mut gen);
     } else {
         panic!("Expected function def")
