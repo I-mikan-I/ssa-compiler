@@ -20,3 +20,7 @@ lrpar = "0.13.1"
 
 [build-dependencies.parser_defs]
 path = "parser"
+
+[features]
+
+print-cfgs = []

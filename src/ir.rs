@@ -244,7 +244,7 @@ pub fn translate_program(context: &mut Context, program: &parser_defs::Program) 
 fn translate_function(
     context: &mut Context,
     scope: &mut SheafTable<Rc<str>, Scope>,
-    function: & parser_defs::Defs,
+    function: &parser_defs::Defs,
     mut gen: VRegGenerator,
 ) {
     if let parser_defs::FunctionDef(i, p, _, b) = function {
@@ -550,6 +550,41 @@ pub struct CFG {
     entry: usize,
 }
 impl CFG {
+    pub fn to_dot(&self) -> String {
+        let mut adjacencies = String::new();
+        let mut attributes = String::new();
+        let mut dominance = String::new();
+        for (i, block) in self.blocks.iter().enumerate() {
+            adjacencies.extend(block.children.iter().map(|j| format!("{i}->{j}\n")));
+            attributes.push_str(&format!(
+                "{i}[label=\"{{{0}|{1}}}\"]\ndom{i}[label=\"{0}\"]\n",
+                block.label,
+                Displayable(&block.body)
+                    .to_string()
+                    .chars()
+                    .filter(|&c| c != '\t')
+                    .collect::<String>()
+                    .escape_default()
+            ));
+            if i > 0 {
+                dominance.push_str(&format!("dom{}->dom{i}\n", block.idom));
+            }
+        }
+        format!(
+            "
+digraph G {{
+node [shape=record]
+
+{adjacencies}
+
+subgraph cluster_dominance {{
+label=\"dom tree\"
+{dominance}
+}}
+
+{attributes}}}"
+        )
+    }
     pub fn get_entry(&self) -> &Block {
         self.blocks.get(self.entry).unwrap()
     }
@@ -665,7 +700,11 @@ impl CFG {
                 .min_by_key(|&v| apsp_reverse[i][v])
                 .unwrap_or(usize::MAX);
         }
-
+        #[cfg(feature = "print-cfgs")]
+        {
+            println!("CFG <from-linear>:");
+            println!("{}", result.to_dot());
+        }
         result
     }
 }
