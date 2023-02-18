@@ -1,0 +1,14 @@
+myvar3 :: Bool = false;
+lambda myfun(myvar3 :: Int) :: Int {
+    myvar4 :: Int = 0;
+    i :: Int = 100;
+    while (i >= 0) do {
+        if i and 1 == 1 then {
+            myvar4 = myvar4 * 3;
+        } else {
+            myvar4 = vyvar4 / 2;
+        }
+    }
+    return myvar4;
+}
+myvar2 :: Bool = true;

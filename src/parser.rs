@@ -3,7 +3,7 @@ use std::error::Error;
 use lrlex::{lrlex_mod, DefaultLexerTypes};
 use lrpar::{lrpar_mod, LexParseError};
 use parser_defs::{
-    Args, Defs, Parameter, Params, ParseErr, Program,
+    Defs, Parameter, Params, ParseErr, Program,
     Type::{self, Bool, Never},
 };
 
@@ -250,15 +250,14 @@ where
     }
 }
 
-pub fn parse(
-    s: &str,
-) -> (
-    Option<Result<Program, ParseErr>>,
+type GRMResult<V, E> = (
+    Option<Result<V, E>>,
     Vec<LexParseError<u32, DefaultLexerTypes>>,
-) {
+);
+pub fn parse(s: &str) -> GRMResult<Program, ParseErr> {
     let lexerdef = language_l::lexerdef();
     let lexer = lexerdef.lexer(s);
-    return language_y::parse(&lexer);
+    language_y::parse(&lexer)
 }
 
 #[cfg(test)]

@@ -15,10 +15,10 @@
 //! | load ad1, ad2, ad3 | result | offset | memory base |
 //! | store ad1, ad2, ad3 | value | offset | memory base |
 //! | la ad1, @label | result | NA | NA |
-//! | bgt ad1, ad2, @label | op1 | op2 | NA |
-//! | bl ad1, ad2, @label | op1 | op2 | NA |
+//! | bgt ad1, ad2, @taken, @else | op1 | op2 | NA |
+//! | bl ad1, ad2, @taken, @else | op1 | op2 | NA |
 //! | j @label | NA | NA | NA |
-//! | beq ad1, ad2, @label | op1 | op2 | NA |
+//! | beq ad1, ad2, @taken, @else | op1 | op2 | NA |
 //! | li ad1, imm  | result | NA | NA |
 //! | slt ad1, ad2, ad3 | result | op1 | op2 |
 //! | call ad1, @label (ad2 ... adn) | result | arg1 | ... |
@@ -49,7 +49,7 @@
 //! (L) xor (R) =>  ...
 //! not (L) =>      li name() -1 // r_new
 //!                 xor lin(L) r_new
-//! (L) >= (R) =>   slt name() lin(R) lin(L) // r_new
+//! (L) >= (R) =>   slt name() lin(L) lin(R) // r_new
 //!                 li name() 1 // r_new2
 //!                 xor name() r_new r_new2
 //! (L) < (R) =>    slt name() lin(L) lin(R)
@@ -63,17 +63,18 @@
 //! ident           name(ident) // reuse register
 //! if (C) then (I)
 //! else (E) =>     li name() 1 // r_new
-//!                 beq lin(C) r_new @l1
-//!                 j @l2
+//!                 beq lin(C) r_new @l1 @l2
 //!                 label(): body(I) // @l1
 //!                 j @l3
 //!                 label(): body(E) // @l2
 //!                 j @l3
 //!                 label(): ... // @l3
 //! while (C)
-//! do (B) =>       label():    // @l1
+//! do (B) =>       j @l1
+//!                 label():    // @l1
 //!                 li name() 0 // r_new
-//!                 beq lin(C) r_ne2 @l2
+//!                 beq lin(C) r_ne2 @l2 @l3
+//!                 label():    // @l3
 //!                 body(B)
 //!                 j @l1
 //!                 label(): ... // @l2
@@ -83,7 +84,7 @@
 
 use parser_defs::Any;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     fmt::Display,
     rc::Rc,
 };
@@ -121,10 +122,10 @@ pub enum Operator {
     Load(VReg, VReg, VReg),
     Store(VReg, VReg, VReg),
     La(VReg, Rc<str>),
-    Bgt(VReg, VReg, Rc<str>),
-    Bl(VReg, VReg, Rc<str>),
+    Bgt(VReg, VReg, Rc<str>, Rc<str>),
+    Bl(VReg, VReg, Rc<str>, Rc<str>),
     J(Rc<str>),
-    Beq(VReg, VReg, Rc<str>),
+    Beq(VReg, VReg, Rc<str>, Rc<str>),
     Li(VReg, i64),
     Slt(VReg, VReg, VReg),
     Call(VReg, Rc<str>, Vec<VReg>),
@@ -158,10 +159,14 @@ impl Display for Operator {
             Operator::Load(rd1, rd2, rd3) => write!(f, "\tload rd{rd1}, rd{rd2}, rd{rd3}"),
             Operator::Store(rd1, rd2, rd3) => write!(f, "\tstore rd{rd1}, rd{rd2}, rd{rd3}"),
             Operator::La(rd1, rd2) => write!(f, "\tla rd{rd1}, @{rd2}"),
-            Operator::Bgt(rd1, rd2, rd3) => write!(f, "\tbgt rd{rd1}, rd{rd2}, @{rd3}"),
-            Operator::Bl(rd1, rd2, rd3) => write!(f, "\tbl rd{rd1}, rd{rd2}, @{rd3}"),
+            Operator::Bgt(rd1, rd2, rd3, rd4) => {
+                write!(f, "\tbgt rd{rd1}, rd{rd2}, @{rd3}, @{rd4}")
+            }
+            Operator::Bl(rd1, rd2, rd3, rd4) => write!(f, "\tbl rd{rd1}, rd{rd2}, @{rd3}, @{rd4}"),
             Operator::J(rd1) => write!(f, "\tj @{rd1}"),
-            Operator::Beq(rd1, rd2, rd3) => write!(f, "\tbeq rd{rd1}, rd{rd2}, @{rd3}"),
+            Operator::Beq(rd1, rd2, rd3, rd4) => {
+                write!(f, "\tbeq rd{rd1}, rd{rd2}, @{rd3}, @{rd4}")
+            }
             Operator::Li(rd1, rd2) => write!(f, "\tli rd{rd1}, #{rd2}"),
             Operator::Slt(rd1, rd2, rd3) => write!(f, "\tslt rd{rd1}, rd{rd2}, rd{rd3}"),
             Operator::Call(rd1, rd2, rd3) => {
@@ -205,6 +210,11 @@ impl Context {
         &self.functions
     }
 }
+impl Default for Context {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 enum Scope {
     Local(VReg),
@@ -231,13 +241,13 @@ pub fn translate_program(context: &mut Context, program: &parser_defs::Program) 
     }
 }
 
-fn translate_function<'a>(
+fn translate_function(
     context: &mut Context,
     scope: &mut SheafTable<Rc<str>, Scope>,
-    function: &'a parser_defs::Defs,
+    function: & parser_defs::Defs,
     mut gen: VRegGenerator,
 ) {
-    if let parser_defs::FunctionDef(i, p, t, b) = function {
+    if let parser_defs::FunctionDef(i, p, _, b) = function {
         let code = Vec::new();
         let mut params = Vec::new();
         for p in p.0.iter() {
@@ -255,10 +265,10 @@ fn translate_function<'a>(
     }
 }
 
-fn translate_block<'a>(
+fn translate_block(
     vec: &mut Vec<Operator>,
     scope: &mut SheafTable<Rc<str>, Scope>,
-    instr: parser_defs::Any<'a>,
+    instr: parser_defs::Any<'_>,
     gen: &mut VRegGenerator,
 ) -> Option<VReg> {
     match instr {
@@ -303,8 +313,7 @@ fn translate_block<'a>(
                 let l3: Rc<_> = gen.next_label().into();
                 let next = gen.next_reg();
                 vec.push(Operator::Li(next, 1));
-                vec.push(Operator::Beq(c, next, Rc::clone(&l1)));
-                vec.push(Operator::J(Rc::clone(&l2)));
+                vec.push(Operator::Beq(c, next, Rc::clone(&l1), Rc::clone(&l2)));
                 vec.push(Operator::Label(Rc::clone(&l1)));
                 translate_block(vec, scope, Any::B(t), gen);
                 vec.push(Operator::J(Rc::clone(&l3)));
@@ -315,13 +324,16 @@ fn translate_block<'a>(
                 None
             }
             parser_defs::Statement::While(c, b) => {
-                let c = translate_block(vec, scope, Any::E(c), gen).unwrap();
                 let l1: Rc<_> = gen.next_label().into();
                 let l2: Rc<_> = gen.next_label().into();
+                let l3: Rc<_> = gen.next_label().into();
                 let next = gen.next_reg();
+                vec.push(Operator::J(Rc::clone(&l1)));
                 vec.push(Operator::Label(Rc::clone(&l1)));
+                let c = translate_block(vec, scope, Any::E(c), gen).unwrap();
                 vec.push(Operator::Li(next, 0));
-                vec.push(Operator::Beq(c, next, Rc::clone(&l2)));
+                vec.push(Operator::Beq(c, next, Rc::clone(&l2), Rc::clone(&l3)));
+                vec.push(Operator::Label(Rc::clone(&l3)));
                 translate_block(vec, scope, Any::B(b), gen);
                 vec.push(Operator::J(Rc::clone(&l1)));
                 vec.push(Operator::Label(Rc::clone(&l2)));
@@ -334,7 +346,7 @@ fn translate_block<'a>(
             }
         },
         Any::D(def) => match def {
-            parser_defs::Defs::VarDef(i, t, e) => {
+            parser_defs::Defs::VarDef(i, _, e) => {
                 let res = translate_block(vec, scope, Any::E(e), gen).unwrap();
                 scope.insert(i.as_str().into(), Scope::Local(res));
                 Some(res)
@@ -444,7 +456,7 @@ fn translate_block<'a>(
                 let next = gen.next_reg();
                 let next2 = gen.next_reg();
                 let next3 = gen.next_reg();
-                vec.push(Operator::Slt(next, right, left));
+                vec.push(Operator::Slt(next, left, right));
                 vec.push(Operator::Li(next2, 1));
                 vec.push(Operator::Xor(next3, next2, next));
                 Some(next3)
@@ -513,43 +525,73 @@ impl Linear for IRLinear {
 }
 
 #[derive(Debug)]
-struct Block {
-    label: Rc<str>,
-    body: Vec<Operator>,
-    preds: Vec<usize>,
-    children: Vec<usize>,
-    doms: Vec<usize>, // dominator tree
+pub struct Block {
+    pub label: Rc<str>,
+    pub body: Vec<Operator>,
+    pub preds: Vec<usize>,
+    pub children: Vec<usize>,
+    pub idom: usize, // dominator tree
 }
 
 impl Block {
-    pub fn empty(label: &Rc<str>) -> Self {
+    fn empty(label: &Rc<str>) -> Self {
         Self {
             label: Rc::clone(label),
             body: Vec::new(),
             preds: Vec::new(),
             children: Vec::new(),
-            doms: Vec::new(),
+            idom: 0,
         }
     }
 }
 #[derive(Debug)]
-struct CFG {
+pub struct CFG {
     blocks: Vec<Block>,
     entry: usize,
 }
 impl CFG {
-    fn get_block(&self, i: usize) -> &Block {
+    pub fn get_entry(&self) -> &Block {
+        self.blocks.get(self.entry).unwrap()
+    }
+    pub fn get_block(&self, i: usize) -> &Block {
         self.blocks.get(i).unwrap()
     }
-    fn from_linear(code: Vec<Operator>) -> Self {
+    fn bfs_reverse(&self, total_blocks: usize, block: usize) -> Vec<usize> {
+        let mut outputs = vec![usize::MAX; total_blocks];
+        outputs[block] = 0;
+        let block = &self.blocks[block];
+        let mut queue: VecDeque<(usize, usize)> = VecDeque::new();
+        queue.extend(block.preds.iter().cloned().zip(std::iter::repeat(1)));
+
+        while let Some((pred, dist)) = queue.pop_front() {
+            let old = outputs[pred];
+            if dist < old {
+                outputs[pred] = dist;
+                let block = &self.blocks[pred];
+                queue.extend(block.preds.iter().cloned().zip(std::iter::repeat(dist + 1)));
+            }
+        }
+        outputs
+    }
+    fn apsp_reverse(&self) -> Vec<Vec<usize>> {
+        let block_len = self.blocks.len();
+        let inner = vec![usize::MAX; block_len];
+        let mut output: Vec<Vec<usize>> = Vec::from_iter(std::iter::repeat(inner).take(block_len));
+        for (i, val) in output.iter_mut().enumerate() {
+            *val = self.bfs_reverse(block_len, i);
+        }
+        output
+    }
+    pub fn from_linear(code: impl AsRef<Vec<Operator>>) -> Self {
+        let code = code.as_ref();
         let mut i = 1;
         let mut labels: HashMap<Rc<str>, usize> = HashMap::new();
         let mut blocks = Vec::from([Block::empty(&Rc::from("@ENTRY"))]);
         for op in code.iter() {
             if let Operator::Label(s) = op {
-                labels.insert(Rc::clone(&s), i);
+                labels.insert(Rc::clone(s), i);
                 i += 1;
-                blocks.push(Block::empty(&s));
+                blocks.push(Block::empty(s));
             }
         }
         let mut start = 0;
@@ -562,10 +604,7 @@ impl CFG {
                     block.body = Vec::from(&code[start..i]);
                     start = i + 1;
                 }
-                Operator::J(s)
-                | Operator::Beq(_, _, s)
-                | Operator::Bl(_, _, s)
-                | Operator::Bgt(_, _, s) => {
+                Operator::J(s) => {
                     let block = &mut blocks[block_idx];
                     let target = *labels.get(s.as_ref()).unwrap();
                     if !block.children.contains(&target) {
@@ -573,13 +612,25 @@ impl CFG {
                         blocks[target].preds.push(block_idx);
                     }
                 }
+                Operator::Beq(_, _, t, f)
+                | Operator::Bl(_, _, t, f)
+                | Operator::Bgt(_, _, t, f) => {
+                    for s in [t, f] {
+                        let block = &mut blocks[block_idx];
+                        let target = *labels.get(s.as_ref()).unwrap();
+                        if !block.children.contains(&target) {
+                            block.children.push(target);
+                            blocks[target].preds.push(block_idx);
+                        }
+                    }
+                }
                 _ => {}
             }
             blocks[block_idx].body = Vec::from(&code[start..]);
         }
 
-        let mut idoms = vec![HashSet::from_iter(0..blocks.len()); blocks.len()];
-        idoms[0] = HashSet::from([0]);
+        let mut doms = vec![HashSet::from_iter(0..blocks.len()); blocks.len()];
+        doms[0] = HashSet::from([0]);
 
         let mut changed = true;
         while changed {
@@ -590,26 +641,32 @@ impl CFG {
                     block
                         .preds
                         .iter()
-                        .map(|n| &idoms[*n])
-                        .fold(idoms[*fst].clone(), |acc, next| {
+                        .map(|n| &doms[*n])
+                        .fold(doms[*fst].clone(), |acc, next| {
                             acc.intersection(next).cloned().collect()
                         })
                 } else {
                     HashSet::new()
                 };
                 new.insert(i);
-                if new != idoms[i] {
+                if new != doms[i] {
                     changed = true;
-                    idoms[i] = new;
+                    doms[i] = new;
                 }
             }
         }
+        let mut result = Self { blocks, entry: 0 };
+        let apsp_reverse = result.apsp_reverse();
 
-        for (i, set) in idoms.into_iter().enumerate() {
-            blocks[i].doms = set.into_iter().collect();
+        for (i, mut set) in doms.into_iter().enumerate() {
+            set.remove(&i);
+            result.blocks[i].idom = set
+                .into_iter()
+                .min_by_key(|&v| apsp_reverse[i][v])
+                .unwrap_or(usize::MAX);
         }
 
-        Self { blocks, entry: 0 }
+        result
     }
 }
 
@@ -626,7 +683,6 @@ mod test {
             Operator::Nop,
             Operator::Nop,
             Operator::J(Rc::clone(&l1)),
-            Operator::Nop,
             Operator::Label(Rc::clone(&l1)),
             Operator::Nop,
             Operator::Nop,
@@ -647,18 +703,17 @@ mod test {
             Operator::J(Rc::clone(&header)),
             Operator::Label(Rc::clone(&header)),
             Operator::Nop,
-            Operator::Beq(0, 0, Rc::clone(&l1)),
-            Operator::J(Rc::clone(&l2)),
+            Operator::Beq(0, 0, Rc::clone(&l1), Rc::clone(&l2)),
             Operator::Label(Rc::clone(&l1)),
-            Operator::J(Rc::clone(&l3)),
             Operator::Nop,
+            Operator::J(Rc::clone(&l3)),
             Operator::Label(Rc::clone(&l2)),
-            Operator::J(Rc::clone(&l3)),
             Operator::Nop,
+            Operator::J(Rc::clone(&l3)),
             Operator::Label(Rc::clone(&l3)),
             Operator::Return(2),
         ];
-        let mut output = CFG::from_linear(input);
+        let output = CFG::from_linear(input);
         assert_eq!(output.blocks[0].children.len(), 1);
         assert_eq!(output.blocks[1].children.len(), 2);
         assert_eq!(output.blocks[2].children.len(), 1);
@@ -666,15 +721,11 @@ mod test {
         assert_eq!(output.blocks[4].children.len(), 0);
         assert_eq!(output.blocks[4].preds.len(), 2);
 
-        for block in output.blocks.iter_mut() {
-            block.doms.sort();
-        }
-
-        assert_eq!(output.blocks[0].doms, vec![0]);
-        assert_eq!(output.blocks[1].doms, vec![0, 1]);
-        assert_eq!(output.blocks[2].doms, vec![0, 1, 2]);
-        assert_eq!(output.blocks[3].doms, vec![0, 1, 3]);
-        assert_eq!(output.blocks[4].doms, vec![0, 1, 4]);
+        assert_eq!(output.blocks[0].idom, usize::MAX);
+        assert_eq!(output.blocks[1].idom, 0);
+        assert_eq!(output.blocks[2].idom, 1);
+        assert_eq!(output.blocks[3].idom, 1);
+        assert_eq!(output.blocks[4].idom, 1);
         println!("{output:?}")
     }
 
@@ -682,31 +733,31 @@ mod test {
     fn build_cfg_while() {
         let l1 = Rc::from("L1");
         let l2 = Rc::from("L2");
+        let l3 = Rc::from("L3");
         let input = vec![
             Operator::Nop,
             Operator::J(Rc::clone(&l1)),
             Operator::Label(Rc::clone(&l1)),
             Operator::Li(33, 0),
-            Operator::Beq(34, 33, Rc::clone(&l2)),
+            Operator::Beq(34, 33, Rc::clone(&l2), Rc::clone(&l3)),
+            Operator::Label(Rc::clone(&l3)),
             Operator::Nop,
             Operator::J(Rc::clone(&l1)),
             Operator::Label(Rc::clone(&l2)),
             Operator::Nop,
         ];
-        let mut output = CFG::from_linear(input);
+        let output = CFG::from_linear(input);
         assert_eq!(output.blocks[0].children.len(), 1);
         assert_eq!(output.blocks[1].children.len(), 2);
-        assert_eq!(output.blocks[2].children.len(), 0);
+        assert_eq!(output.blocks[2].children.len(), 1);
+        assert_eq!(output.blocks[3].children.len(), 0);
         assert_eq!(output.blocks[1].preds.len(), 2);
 
-        for block in output.blocks.iter_mut() {
-            block.doms.sort();
-        }
         println!("{output:?}");
 
-        assert_eq!(output.blocks[0].doms, vec![0]);
-        assert_eq!(output.blocks[1].doms, vec![0, 1]);
-        assert_eq!(output.blocks[2].doms, vec![0, 1, 2]);
+        assert_eq!(output.blocks[0].idom, usize::MAX);
+        assert_eq!(output.blocks[1].idom, 0);
+        assert_eq!(output.blocks[2].idom, 1);
     }
 }
 
