@@ -154,21 +154,76 @@ mod tests {
         );
         assert_eq!(&params[..], &[0][..]);
 
-        let cfg = CFG::from_linear(body);
+        let cfg = CFG::from_linear(body, &[0]);
         println!("{:?}", cfg);
+        assert_eq!(
+            cfg.get_block(0).body,
+            vec![
+                Operator::GetParameter(0, 0),
+                Operator::Li(1, 0),
+                Operator::Li(2, 100),
+                Operator::J(std::rc::Rc::from("_LABEL_0"))
+            ]
+        );
         assert_eq!(cfg.get_block(0).children, vec![1]);
-        assert_eq!(cfg.get_block(0).idom, usize::MAX);
+        assert_eq!(cfg.get_block(0).idom, None);
         assert_eq!(cfg.get_block(1).children, vec![6, 2]);
-        assert_eq!(cfg.get_block(1).idom, 0);
+        assert_eq!(cfg.get_block(1).idom.unwrap(), 0);
         assert_eq!(cfg.get_block(2).children, vec![3, 4]);
-        assert_eq!(cfg.get_block(2).idom, 1);
+        assert_eq!(cfg.get_block(2).idom.unwrap(), 1);
         assert_eq!(cfg.get_block(3).children, vec![5]);
-        assert_eq!(cfg.get_block(3).idom, 2);
+        assert_eq!(cfg.get_block(3).idom.unwrap(), 2);
         assert_eq!(cfg.get_block(4).children, vec![5]);
-        assert_eq!(cfg.get_block(4).idom, 2);
+        assert_eq!(cfg.get_block(4).idom.unwrap(), 2);
         assert_eq!(cfg.get_block(5).children, vec![1]);
-        assert_eq!(cfg.get_block(5).idom, 2);
+        assert_eq!(cfg.get_block(5).idom.unwrap(), 2);
         assert_eq!(cfg.get_block(6).children, vec![]);
-        assert_eq!(cfg.get_block(6).idom, 1);
+        assert_eq!(cfg.get_block(6).idom.unwrap(), 1);
+    }
+
+    #[test]
+    fn test_cfg_empty() {
+        let input = "
+        lambda myfun() :: Int {
+
+        }
+        ";
+        let result = parse(&input);
+        assert!(result.1.is_empty());
+        assert!(result.0.is_some());
+        assert!(result.0.as_ref().unwrap().is_ok());
+        let p = result.0.unwrap().unwrap();
+        let res = validate(&p);
+        assert!(res.is_none(), "{}", res.unwrap());
+
+        let mut context = Context::new();
+        translate_program(&mut context, &p);
+        let funs = context.get_functions();
+        let fun = funs.get("myfun").unwrap();
+        let body = fun.get_body();
+        println!("{}", Displayable(&body[..]));
+        let params = fun.get_params();
+        /*
+        rd1 = myvar4
+        rd2 = i
+         */
+        let expected = "";
+        assert_eq!(
+            expected
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect::<String>(),
+            Displayable(&body[..])
+                .to_string()
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect::<String>()
+        );
+        assert_eq!(&params[..], &[][..]);
+
+        let cfg = CFG::from_linear(body, &[]);
+        println!("{:?}", cfg);
+        assert_eq!(cfg.get_block(0).children, vec![]);
+        assert_eq!(cfg.get_block(0).idom, None);
     }
 }

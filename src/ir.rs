@@ -131,6 +131,8 @@ pub enum Operator {
     Call(VReg, Rc<str>, Vec<VReg>),
     Return(VReg),
     Label(Rc<str>),
+    /// Loads param 2nd into fst
+    GetParameter(VReg, u64),
     Nop,
 }
 
@@ -178,39 +180,40 @@ impl Display for Operator {
             }
             Operator::Return(rd1) => write!(f, "\treturn rd{rd1}"),
             Operator::Label(rd1) => write!(f, "@{rd1}:"),
+            Operator::GetParameter(rd1, rd2) => write!(f, "\tgetParam rd{rd1}, {rd2}"),
             Operator::Nop => write!(f, "nop"),
         }
     }
 }
-pub struct Function {
-    body: Vec<Operator>,
+pub struct Function<B> {
+    body: B,
     params: Vec<VReg>,
 }
-impl Function {
-    pub fn get_body(&self) -> &Vec<Operator> {
+impl<B> Function<B> {
+    pub fn get_body(&self) -> &B {
         &self.body
     }
-    pub fn get_body_mut(&mut self) -> &mut Vec<Operator> {
+    pub fn get_body_mut(&mut self) -> &mut B {
         &mut self.body
     }
     pub fn get_params(&self) -> &Vec<VReg> {
         &self.params
     }
 }
-pub struct Context {
-    functions: HashMap<String, Function>,
+pub struct Context<B> {
+    functions: HashMap<String, Function<B>>,
 }
-impl Context {
+impl<B> Context<B> {
     pub fn new() -> Self {
         Self {
             functions: HashMap::new(),
         }
     }
-    pub fn get_functions(&self) -> &HashMap<String, Function> {
+    pub fn get_functions(&self) -> &HashMap<String, Function<B>> {
         &self.functions
     }
 }
-impl Default for Context {
+impl<B> Default for Context<B> {
     fn default() -> Self {
         Self::new()
     }
@@ -221,7 +224,7 @@ enum Scope {
     Global,
 }
 
-pub fn translate_program(context: &mut Context, program: &parser_defs::Program) {
+pub fn translate_program(context: &mut Context<Vec<Operator>>, program: &parser_defs::Program) {
     let defs = &program.0;
     let mut scope = SheafTable::new();
     for g in defs {
@@ -242,7 +245,7 @@ pub fn translate_program(context: &mut Context, program: &parser_defs::Program) 
 }
 
 fn translate_function(
-    context: &mut Context,
+    context: &mut Context<Vec<Operator>>,
     scope: &mut SheafTable<Rc<str>, Scope>,
     function: &parser_defs::Defs,
     mut gen: VRegGenerator,
@@ -495,13 +498,13 @@ fn translate_block(
     }
 }
 
-pub struct IRLinear(Function);
+pub struct IRLinear(Function<Vec<Operator>>);
 impl IRLinear {
-    pub fn get_mut(&mut self) -> &mut Function {
+    pub fn get_mut(&mut self) -> &mut Function<Vec<Operator>> {
         &mut self.0
     }
 }
-pub struct IRSSA(Function);
+pub struct IRSSA(Function<CFG>);
 impl SSA for IRSSA {
     type Operation = Operator;
 
@@ -530,7 +533,9 @@ pub struct Block {
     pub body: Vec<Operator>,
     pub preds: Vec<usize>,
     pub children: Vec<usize>,
-    pub idom: usize, // dominator tree
+    /// Idom of dominator tree.
+    /// None if entry node, else Some.
+    pub idom: Option<usize>,
 }
 
 impl Block {
@@ -540,7 +545,7 @@ impl Block {
             body: Vec::new(),
             preds: Vec::new(),
             children: Vec::new(),
-            idom: 0,
+            idom: None,
         }
     }
 }
@@ -566,8 +571,8 @@ impl CFG {
                     .collect::<String>()
                     .escape_default()
             ));
-            if i > 0 {
-                dominance.push_str(&format!("dom{}->dom{i}\n", block.idom));
+            if let Some(idom) = block.idom {
+                dominance.push_str(&format!("dom{}->dom{i}\n", idom));
             }
         }
         format!(
@@ -617,11 +622,12 @@ label=\"dom tree\"
         }
         output
     }
-    pub fn from_linear(code: impl AsRef<Vec<Operator>>) -> Self {
+    pub fn from_linear(code: impl AsRef<[Operator]>, params: impl AsRef<[VReg]>) -> Self {
         let code = code.as_ref();
         let mut i = 1;
         let mut labels: HashMap<Rc<str>, usize> = HashMap::new();
-        let mut blocks = Vec::from([Block::empty(&Rc::from("@ENTRY"))]);
+        let mut blocks = Vec::from([Block::empty(&Rc::from("ENTRY"))]);
+
         for op in code.iter() {
             if let Operator::Label(s) = op {
                 labels.insert(Rc::clone(s), i);
@@ -663,6 +669,12 @@ label=\"dom tree\"
             }
             blocks[block_idx].body = Vec::from(&code[start..]);
         }
+        blocks[0].body = params
+            .as_ref()
+            .iter()
+            .map(|&vr| Operator::GetParameter(vr, vr as u64))
+            .chain(std::mem::take(&mut blocks[0].body).into_iter())
+            .collect();
 
         let mut doms = vec![HashSet::from_iter(0..blocks.len()); blocks.len()];
         doms[0] = HashSet::from([0]);
@@ -695,10 +707,7 @@ label=\"dom tree\"
 
         for (i, mut set) in doms.into_iter().enumerate() {
             set.remove(&i);
-            result.blocks[i].idom = set
-                .into_iter()
-                .min_by_key(|&v| apsp_reverse[i][v])
-                .unwrap_or(usize::MAX);
+            result.blocks[i].idom = set.into_iter().min_by_key(|&v| apsp_reverse[i][v]);
         }
         #[cfg(feature = "print-cfgs")]
         {
@@ -727,7 +736,7 @@ mod test {
             Operator::Nop,
             Operator::Return(2),
         ];
-        let output = CFG::from_linear(input);
+        let output = CFG::from_linear(input, &[]);
         println!("{output:?}")
     }
 
@@ -752,7 +761,7 @@ mod test {
             Operator::Label(Rc::clone(&l3)),
             Operator::Return(2),
         ];
-        let output = CFG::from_linear(input);
+        let output = CFG::from_linear(input, &[]);
         assert_eq!(output.blocks[0].children.len(), 1);
         assert_eq!(output.blocks[1].children.len(), 2);
         assert_eq!(output.blocks[2].children.len(), 1);
@@ -760,11 +769,11 @@ mod test {
         assert_eq!(output.blocks[4].children.len(), 0);
         assert_eq!(output.blocks[4].preds.len(), 2);
 
-        assert_eq!(output.blocks[0].idom, usize::MAX);
-        assert_eq!(output.blocks[1].idom, 0);
-        assert_eq!(output.blocks[2].idom, 1);
-        assert_eq!(output.blocks[3].idom, 1);
-        assert_eq!(output.blocks[4].idom, 1);
+        assert_eq!(output.blocks[0].idom, None);
+        assert_eq!(output.blocks[1].idom.unwrap(), 0);
+        assert_eq!(output.blocks[2].idom.unwrap(), 1);
+        assert_eq!(output.blocks[3].idom.unwrap(), 1);
+        assert_eq!(output.blocks[4].idom.unwrap(), 1);
         println!("{output:?}")
     }
 
@@ -785,7 +794,7 @@ mod test {
             Operator::Label(Rc::clone(&l2)),
             Operator::Nop,
         ];
-        let output = CFG::from_linear(input);
+        let output = CFG::from_linear(input, &[]);
         assert_eq!(output.blocks[0].children.len(), 1);
         assert_eq!(output.blocks[1].children.len(), 2);
         assert_eq!(output.blocks[2].children.len(), 1);
@@ -794,9 +803,9 @@ mod test {
 
         println!("{output:?}");
 
-        assert_eq!(output.blocks[0].idom, usize::MAX);
-        assert_eq!(output.blocks[1].idom, 0);
-        assert_eq!(output.blocks[2].idom, 1);
+        assert_eq!(output.blocks[0].idom, None);
+        assert_eq!(output.blocks[1].idom.unwrap(), 0);
+        assert_eq!(output.blocks[2].idom.unwrap(), 1);
     }
 }
 
