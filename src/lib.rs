@@ -154,7 +154,7 @@ mod tests {
         );
         assert_eq!(&params[..], &[0][..]);
 
-        let cfg = CFG::from_linear(body, &[0]);
+        let mut cfg = CFG::from_linear(body, fun.get_params(), fun.get_max_reg());
         println!("{:?}", cfg);
         assert_eq!(
             cfg.get_block(0).body,
@@ -179,6 +179,8 @@ mod tests {
         assert_eq!(cfg.get_block(5).idom.unwrap(), 2);
         assert_eq!(cfg.get_block(6).children, vec![]);
         assert_eq!(cfg.get_block(6).idom.unwrap(), 1);
+        //DEBUG
+        cfg.to_ssa();
     }
 
     #[test]
@@ -221,7 +223,7 @@ mod tests {
         );
         assert_eq!(&params[..], &[][..]);
 
-        let cfg = CFG::from_linear(body, &[]);
+        let cfg = CFG::from_linear(body, fun.get_params(), fun.get_max_reg());
         println!("{:?}", cfg);
         assert_eq!(cfg.get_block(0).children, vec![]);
         assert_eq!(cfg.get_block(0).idom, None);

@@ -87,6 +87,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     fmt::Display,
     rc::Rc,
+    result,
 };
 
 use crate::ssa::{Linear, SSA};
@@ -95,6 +96,9 @@ use crate::util::SheafTable;
 type VReg = u32;
 struct VRegGenerator(u32, u32);
 impl VRegGenerator {
+    pub fn starting_at(at: u32) -> Self {
+        Self(at, 0)
+    }
     pub fn new() -> Self {
         Self(0, 0)
     }
@@ -136,9 +140,12 @@ pub enum Operator {
     Nop,
 }
 
-pub struct Displayable<'a>(pub &'a [Operator]);
+pub struct Displayable<'a, O>(pub &'a [O]);
 
-impl<'a> Display for Displayable<'a> {
+impl<'a, O> Display for Displayable<'a, O>
+where
+    O: Display,
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         for op in self.0 {
             writeln!(f, "{op}")?;
@@ -176,7 +183,7 @@ impl Display for Operator {
                 for reg in rd3 {
                     write!(f, "{reg} ")?;
                 }
-                write!(f, " )")
+                write!(f, ")")
             }
             Operator::Return(rd1) => write!(f, "\treturn rd{rd1}"),
             Operator::Label(rd1) => write!(f, "@{rd1}:"),
@@ -185,9 +192,25 @@ impl Display for Operator {
         }
     }
 }
+
+impl Display for SSAOperator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SSAOperator::IROp(op) => write!(f, "{op}"),
+            SSAOperator::Phi(rd1, args) => {
+                write!(f, "\trd{rd1} <- \u{03D5} ( ")?;
+                for arg in args {
+                    write!(f, "{arg} ")?;
+                }
+                write!(f, ")")
+            }
+        }
+    }
+}
 pub struct Function<B> {
     body: B,
     params: Vec<VReg>,
+    max_reg: VReg,
 }
 impl<B> Function<B> {
     pub fn get_body(&self) -> &B {
@@ -198,6 +221,9 @@ impl<B> Function<B> {
     }
     pub fn get_params(&self) -> &Vec<VReg> {
         &self.params
+    }
+    pub fn get_max_reg(&self) -> VReg {
+        self.max_reg
     }
 }
 pub struct Context<B> {
@@ -258,11 +284,17 @@ fn translate_function(
             scope.insert(p.0.as_str().into(), Scope::Local(reg));
             params.push(reg);
         }
-        context
-            .functions
-            .insert(i.clone(), Function { body: code, params });
+        context.functions.insert(
+            i.clone(),
+            Function {
+                body: code,
+                params,
+                max_reg: 0,
+            },
+        );
         let code = context.functions.get_mut(i).unwrap().get_body_mut();
         translate_block(code, scope, Any::B(b), &mut gen);
+        context.functions.get_mut(i).unwrap().max_reg = gen.next_reg();
     } else {
         panic!("Expected function def")
     }
@@ -504,7 +536,7 @@ impl IRLinear {
         &mut self.0
     }
 }
-pub struct IRSSA(Function<CFG>);
+pub struct IRSSA(Function<CFG<SSAOperator>>);
 impl SSA for IRSSA {
     type Operation = Operator;
 
@@ -527,18 +559,25 @@ impl Linear for IRLinear {
     }
 }
 
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub enum SSAOperator {
+    IROp(Operator),
+    Phi(VReg, Vec<VReg>),
+}
 #[derive(Debug)]
-pub struct Block {
+pub struct Block<O> {
     pub label: Rc<str>,
-    pub body: Vec<Operator>,
+    pub body: Vec<O>,
     pub preds: Vec<usize>,
     pub children: Vec<usize>,
     /// Idom of dominator tree.
     /// None if entry node, else Some.
     pub idom: Option<usize>,
+    pub idom_of: Vec<usize>,
+    mark: bool,
 }
 
-impl Block {
+impl<O> Block<O> {
     fn empty(label: &Rc<str>) -> Self {
         Self {
             label: Rc::clone(label),
@@ -546,15 +585,32 @@ impl Block {
             preds: Vec::new(),
             children: Vec::new(),
             idom: None,
+            idom_of: Vec::new(),
+            mark: false,
+        }
+    }
+    fn into_other<T>(self, body: Vec<T>) -> Block<T> {
+        Block {
+            label: self.label,
+            body: body,
+            preds: self.preds,
+            children: self.children,
+            idom: self.idom,
+            idom_of: self.idom_of,
+            mark: self.mark,
         }
     }
 }
 #[derive(Debug)]
-pub struct CFG {
-    blocks: Vec<Block>,
+pub struct CFG<O> {
+    blocks: Vec<Block<O>>,
     entry: usize,
+    max_reg: VReg,
 }
-impl CFG {
+impl<O> CFG<O>
+where
+    O: Display,
+{
     pub fn to_dot(&self) -> String {
         let mut adjacencies = String::new();
         let mut attributes = String::new();
@@ -568,8 +624,12 @@ impl CFG {
                     .to_string()
                     .chars()
                     .filter(|&c| c != '\t')
+                    .flat_map(|c| match c {
+                        '\n' => "\\n".chars().collect(),
+                        '<' => "\\<".chars().collect(),
+                        c => vec![c],
+                    })
                     .collect::<String>()
-                    .escape_default()
             ));
             if let Some(idom) = block.idom {
                 dominance.push_str(&format!("dom{}->dom{i}\n", idom));
@@ -590,10 +650,12 @@ label=\"dom tree\"
 {attributes}}}"
         )
     }
-    pub fn get_entry(&self) -> &Block {
+}
+impl CFG<Operator> {
+    pub fn get_entry(&self) -> &Block<Operator> {
         self.blocks.get(self.entry).unwrap()
     }
-    pub fn get_block(&self, i: usize) -> &Block {
+    pub fn get_block(&self, i: usize) -> &Block<Operator> {
         self.blocks.get(i).unwrap()
     }
     fn bfs_reverse(&self, total_blocks: usize, block: usize) -> Vec<usize> {
@@ -622,7 +684,11 @@ label=\"dom tree\"
         }
         output
     }
-    pub fn from_linear(code: impl AsRef<[Operator]>, params: impl AsRef<[VReg]>) -> Self {
+    pub fn from_linear(
+        code: impl AsRef<[Operator]>,
+        params: impl AsRef<[VReg]>,
+        max_reg: VReg,
+    ) -> Self {
         let code = code.as_ref();
         let mut i = 1;
         let mut labels: HashMap<Rc<str>, usize> = HashMap::new();
@@ -702,12 +768,20 @@ label=\"dom tree\"
                 }
             }
         }
-        let mut result = Self { blocks, entry: 0 };
+        let mut result = Self {
+            blocks,
+            entry: 0,
+            max_reg,
+        };
         let apsp_reverse = result.apsp_reverse();
 
         for (i, mut set) in doms.into_iter().enumerate() {
             set.remove(&i);
-            result.blocks[i].idom = set.into_iter().min_by_key(|&v| apsp_reverse[i][v]);
+            let idom = set.into_iter().min_by_key(|&v| apsp_reverse[i][v]);
+            result.blocks[i].idom = idom;
+            if let Some(idom) = idom {
+                result.blocks[idom].idom_of.push(i);
+            }
         }
         #[cfg(feature = "print-cfgs")]
         {
@@ -715,6 +789,241 @@ label=\"dom tree\"
             println!("{}", result.to_dot());
         }
         result
+    }
+    fn rename_blocks(
+        &mut self,
+        block: usize,
+        globals: &Vec<VReg>,
+        names: &mut HashMap<VReg, Vec<VReg>>,
+        generator: &mut VRegGenerator,
+        phis: &mut Vec<Vec<SSAOperator>>,
+    ) {
+        let current = block;
+        for &global in globals.iter() {
+            let last = names.entry(global).or_default();
+            let next = last.last().cloned().unwrap_or(u32::MAX); // should never be used
+            last.push(next);
+        }
+        for op in &mut phis[current] {
+            if let SSAOperator::Phi(rec, _) = op {
+                let old = *rec;
+                *(names.get_mut(&old).unwrap().last_mut().unwrap()) = generator.next_reg();
+                *rec = *names[&old].last().unwrap();
+            }
+        }
+        macro_rules! update_name {
+            ($name:expr) => {
+                if globals.contains($name) {
+                    let old = *$name;
+                    *$name = *names[&old].last().unwrap();
+                }
+            };
+        }
+        macro_rules! set_name {
+            ($name:expr) => {
+                if globals.contains($name) {
+                    let old = *$name;
+                    *(names.get_mut(&old).unwrap().last_mut().unwrap()) = generator.next_reg();
+                    *$name = *names[&old].last().unwrap();
+                }
+            };
+        }
+        for op in &mut self.blocks[current].body {
+            match op {
+                Operator::Add(x, y, z)
+                | Operator::Sub(x, y, z)
+                | Operator::Mult(x, y, z)
+                | Operator::Div(x, y, z)
+                | Operator::Xor(x, y, z)
+                | Operator::Slt(x, y, z)
+                | Operator::Load(x, y, z)
+                | Operator::Store(x, y, z)
+                | Operator::And(x, y, z)
+                | Operator::Or(x, y, z) => {
+                    update_name!(y);
+                    update_name!(z);
+                    set_name!(x);
+                }
+                Operator::Li(x, _) | Operator::La(x, _) => {
+                    set_name!(x);
+                }
+                Operator::Mv(x, y) => {
+                    update_name!(y);
+                    set_name!(x);
+                }
+                Operator::Bgt(x, y, _, _)
+                | Operator::Bl(x, y, _, _)
+                | Operator::Beq(x, y, _, _) => {
+                    update_name!(y);
+                    update_name!(x);
+                }
+                Operator::Call(x, y, z) => {
+                    for name in z {
+                        update_name!(name);
+                    }
+                    set_name!(x);
+                }
+                Operator::Return(x) | Operator::GetParameter(x, _) => {
+                    update_name!(x);
+                }
+                _ => {}
+            }
+        }
+        for (i, &child) in self.blocks[current].children.iter().enumerate() {
+            for phi in &mut phis[child] {
+                if let SSAOperator::Phi(_, args) = phi {
+                    let selfpos = self.blocks[child]
+                        .preds
+                        .iter()
+                        .position(|&v| v == current)
+                        .unwrap();
+
+                    update_name!(&mut args[selfpos]);
+                }
+            }
+        }
+        for idomsucc in self.blocks[current].idom_of.clone() {
+            self.rename_blocks(idomsucc, globals, names, generator, phis);
+        }
+        for global in globals.iter() {
+            names.get_mut(global).unwrap().pop();
+        }
+    }
+    /// to_ssa transforms the CFG into SSA form.
+    pub fn to_ssa(mut self) -> CFG<SSAOperator> {
+        let frontiers = self.get_dominance_frontiers();
+        let (globals, defined_in) = self.get_global_regs();
+        let mut phis = vec![vec![]; self.blocks.len()];
+        //phase 1: generate phi functions
+        for &global in globals.iter() {
+            let mut queue: Vec<_> = defined_in[&global].clone();
+            while let Some(next) = queue.pop() {
+                for &succ in &frontiers[next] {
+                    let entry =
+                        SSAOperator::Phi(global, vec![global; self.blocks[succ].preds.len()]);
+                    if !phis[succ].contains(&entry) {
+                        phis[succ].push(entry);
+                        queue.push(succ);
+                    }
+                }
+            }
+        }
+        let mut generator = VRegGenerator::starting_at(self.max_reg + 1);
+        let mut names: HashMap<VReg, Vec<VReg>> = HashMap::new();
+        self.rename_blocks(0, &globals, &mut names, &mut generator, &mut phis);
+        let new_blocks: Vec<Block<SSAOperator>> = phis
+            .into_iter()
+            .zip(self.blocks.into_iter())
+            .map(|(mut vec, mut block)| {
+                let old = std::mem::take(&mut block.body);
+                let mut modified = old
+                    .into_iter()
+                    .map(|op| SSAOperator::IROp(op))
+                    .collect::<Vec<SSAOperator>>();
+                vec.append(&mut modified);
+                block.into_other(vec)
+            })
+            .collect();
+        let result = CFG {
+            blocks: new_blocks,
+            entry: self.entry,
+            max_reg: self.max_reg,
+        };
+        #[cfg(feature = "print-cfgs")]
+        {
+            println!("CFG <to-ssa>:");
+            println!("{}", result.to_dot());
+        }
+        result
+    }
+    /// calculates dominance frontiers for each block.
+    /// Must be a valid CFG as constructed by 'from_linear'.
+    fn get_dominance_frontiers(&self) -> Vec<HashSet<usize>> {
+        let blocks = self.blocks.len();
+        let mut frontier = vec![HashSet::new(); blocks];
+        for (i, block) in self.blocks.iter().enumerate() {
+            for &pred in &block.preds {
+                if let Some(idom) = block.idom {
+                    let mut current = pred;
+                    while idom != current {
+                        frontier[current].insert(i);
+                        if let Some(next) = self.blocks[current].idom {
+                            current = next;
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        frontier
+    }
+    /// gets global regs and the blocks that they are used in.
+    fn get_global_regs(&self) -> (Vec<VReg>, HashMap<VReg, Vec<usize>>) {
+        let mut exposed = HashSet::new();
+        let mut defined_in: HashMap<VReg, HashSet<usize>> = HashMap::new();
+        for (i, block) in self.blocks.iter().enumerate() {
+            let mut killed = HashSet::new();
+            for op in &block.body {
+                macro_rules! test_and_insert {
+                    ($reg:expr) => {
+                        if !killed.contains($reg) {
+                            exposed.insert(*$reg);
+                        }
+                    };
+                }
+                match op {
+                    Operator::Add(x, y, z)
+                    | Operator::Slt(x, y, z)
+                    | Operator::Sub(x, y, z)
+                    | Operator::Mult(x, y, z)
+                    | Operator::Div(x, y, z)
+                    | Operator::And(x, y, z)
+                    | Operator::Or(x, y, z)
+                    | Operator::Xor(x, y, z)
+                    | Operator::Load(x, y, z)
+                    | Operator::Store(x, y, z) => {
+                        test_and_insert!(y);
+                        test_and_insert!(z);
+                        killed.insert(x);
+                        defined_in.entry(*x).or_default().insert(i);
+                    }
+                    Operator::GetParameter(x, ..) | Operator::La(x, ..) | Operator::Li(x, ..) => {
+                        killed.insert(x);
+                        defined_in.entry(*x).or_default().insert(i);
+                    }
+                    Operator::Mv(x, y) => {
+                        test_and_insert!(y);
+                        killed.insert(x);
+                        defined_in.entry(*x).or_default().insert(i);
+                    }
+                    Operator::Call(x, _, args) => {
+                        for vr in args {
+                            test_and_insert!(vr);
+                        }
+                        killed.insert(x);
+                        defined_in.entry(*x).or_default().insert(i);
+                    }
+                    Operator::Bgt(y, z, _, _)
+                    | Operator::Bl(y, z, _, _)
+                    | Operator::Beq(y, z, _, _) => {
+                        test_and_insert!(y);
+                        test_and_insert!(z);
+                    }
+                    Operator::Return(y) => {
+                        test_and_insert!(y);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        (
+            exposed.into_iter().collect(),
+            defined_in
+                .into_iter()
+                .map(|(k, v)| (k, v.into_iter().collect()))
+                .collect(),
+        )
     }
 }
 
@@ -736,7 +1045,7 @@ mod test {
             Operator::Nop,
             Operator::Return(2),
         ];
-        let output = CFG::from_linear(input, &[]);
+        let output = CFG::from_linear(input, &[], 2);
         println!("{output:?}")
     }
 
@@ -761,7 +1070,7 @@ mod test {
             Operator::Label(Rc::clone(&l3)),
             Operator::Return(2),
         ];
-        let output = CFG::from_linear(input, &[]);
+        let output = CFG::from_linear(input, &[], 2);
         assert_eq!(output.blocks[0].children.len(), 1);
         assert_eq!(output.blocks[1].children.len(), 2);
         assert_eq!(output.blocks[2].children.len(), 1);
@@ -794,7 +1103,7 @@ mod test {
             Operator::Label(Rc::clone(&l2)),
             Operator::Nop,
         ];
-        let output = CFG::from_linear(input, &[]);
+        let output = CFG::from_linear(input, &[], 34);
         assert_eq!(output.blocks[0].children.len(), 1);
         assert_eq!(output.blocks[1].children.len(), 2);
         assert_eq!(output.blocks[2].children.len(), 1);
