@@ -87,7 +87,6 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     fmt::Display,
     rc::Rc,
-    result,
 };
 
 use crate::ssa::{Linear, SSA};
@@ -592,7 +591,7 @@ impl<O> Block<O> {
     fn into_other<T>(self, body: Vec<T>) -> Block<T> {
         Block {
             label: self.label,
-            body: body,
+            body,
             preds: self.preds,
             children: self.children,
             idom: self.idom,
@@ -813,6 +812,7 @@ impl CFG<Operator> {
         }
         macro_rules! update_name {
             ($name:expr) => {
+                #[allow(clippy::unnecessary_mut_passed)]
                 if globals.contains($name) {
                     let old = *$name;
                     *$name = *names[&old].last().unwrap();
@@ -869,7 +869,7 @@ impl CFG<Operator> {
                 _ => {}
             }
         }
-        for (i, &child) in self.blocks[current].children.iter().enumerate() {
+        for &child in self.blocks[current].children.iter() {
             for phi in &mut phis[child] {
                 if let SSAOperator::Phi(_, args) = phi {
                     let selfpos = self.blocks[child]
@@ -918,7 +918,7 @@ impl CFG<Operator> {
                 let old = std::mem::take(&mut block.body);
                 let mut modified = old
                     .into_iter()
-                    .map(|op| SSAOperator::IROp(op))
+                    .map(SSAOperator::IROp)
                     .collect::<Vec<SSAOperator>>();
                 vec.append(&mut modified);
                 block.into_other(vec)
@@ -929,6 +929,7 @@ impl CFG<Operator> {
             entry: self.entry,
             max_reg: self.max_reg,
         };
+        let _ = result;
         #[cfg(feature = "print-cfgs")]
         {
             println!("CFG <to-ssa>:");
