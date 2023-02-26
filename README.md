@@ -11,7 +11,7 @@ The compiler will host an optimization pipeline and native machine code generati
     - [x] Definition (DONE)
     - [x] Translation from AST (DONE)
     - [x] CFG construction (DONE)
-    - [ ] SSA transformation
+    - [x] SSA transformation
 - [ ] Optimization passes
 - [ ] Backend
 
