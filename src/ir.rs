@@ -844,7 +844,7 @@ impl CFG<Operator> {
                     update_name!(z);
                     set_name!(x);
                 }
-                Operator::Li(x, _) | Operator::La(x, _) => {
+                Operator::Li(x, _) | Operator::La(x, _) | Operator::GetParameter(x, _) => {
                     set_name!(x);
                 }
                 Operator::Mv(x, y) => {
@@ -857,13 +857,13 @@ impl CFG<Operator> {
                     update_name!(y);
                     update_name!(x);
                 }
-                Operator::Call(x, y, z) => {
+                Operator::Call(x, _, z) => {
                     for name in z {
                         update_name!(name);
                     }
                     set_name!(x);
                 }
-                Operator::Return(x) | Operator::GetParameter(x, _) => {
+                Operator::Return(x) => {
                     update_name!(x);
                 }
                 _ => {}
@@ -1030,8 +1030,14 @@ impl CFG<Operator> {
 
 #[cfg(test)]
 mod test {
+    use proptest::prelude::*;
+    use proptest::prop_oneof;
+    use proptest::strategy::Strategy;
+
     use super::Operator;
     use super::CFG;
+    use std::collections::HashSet;
+    use std::collections::VecDeque;
     use std::rc::Rc;
 
     #[test]
@@ -1116,6 +1122,209 @@ mod test {
         assert_eq!(output.blocks[0].idom, None);
         assert_eq!(output.blocks[1].idom.unwrap(), 0);
         assert_eq!(output.blocks[2].idom.unwrap(), 1);
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(20))]
+        #[test]
+        fn test_strategy(cfg in any_with::<CFG<Operator>>((20, 20, 20))) {
+            println!("{}", cfg.to_dot());
+            let ssa = cfg.to_ssa();
+            println!("{}", ssa.to_dot());
+        }
+    }
+
+    fn arbitrary_stmt(
+        reg1: super::VReg,
+        reg2: super::VReg,
+        reg3: super::VReg,
+        label: Rc<str>,
+    ) -> impl Strategy<Value = Operator> {
+        prop_oneof![
+            Just(Operator::Nop),
+            Just(Operator::Add(reg1, reg2, reg3)),
+            Just(Operator::Sub(reg1, reg2, reg3)),
+            Just(Operator::Mult(reg1, reg2, reg3)),
+            Just(Operator::Div(reg1, reg2, reg3)),
+            Just(Operator::And(reg1, reg2, reg3)),
+            Just(Operator::Or(reg1, reg2, reg3)),
+            Just(Operator::Xor(reg1, reg2, reg3)),
+            Just(Operator::La(reg1, label)),
+            Just(Operator::Load(reg1, reg2, reg3)),
+            Just(Operator::Slt(reg1, reg2, reg3)),
+            Just(Operator::Store(reg1, reg2, reg3)),
+            Just(Operator::Load(reg1, reg2, reg3)),
+            Just(Operator::Load(reg1, reg2, reg3)),
+            Just(Operator::Load(reg1, reg2, reg3)),
+            Just(Operator::Mv(reg1, reg2)),
+            any::<i64>().prop_map(move |i| Operator::Li(reg1, i)),
+        ]
+    }
+
+    fn arbitrary_branch(
+        reg1: super::VReg,
+        reg2: super::VReg,
+        label1: Rc<str>,
+        label2: Rc<str>,
+    ) -> impl Strategy<Value = Operator> {
+        prop_oneof![
+            Just(Operator::Beq(
+                reg1,
+                reg2,
+                Rc::clone(&label1),
+                Rc::clone(&label2)
+            )),
+            Just(Operator::Bl(
+                reg1,
+                reg2,
+                Rc::clone(&label1),
+                Rc::clone(&label2)
+            )),
+            Just(Operator::Bgt(
+                reg1,
+                reg2,
+                Rc::clone(&label1),
+                Rc::clone(&label2)
+            )),
+        ]
+    }
+
+    fn arbitrary_block(
+        len: usize,
+        children: Vec<Rc<str>>,
+        reg_range: impl Strategy<Value = super::VReg> + Clone + 'static,
+    ) -> impl Strategy<Value = Vec<Operator>> {
+        let body = proptest::collection::vec(
+            (
+                reg_range.clone(),
+                reg_range.clone(),
+                reg_range.clone(),
+                "[a-z]*",
+            )
+                .prop_flat_map(|(reg1, reg2, reg3, lb)| {
+                    arbitrary_stmt(reg1, reg2, reg3, Rc::from(&lb[..]))
+                }),
+            len,
+        );
+        let body: BoxedStrategy<Vec<Operator>> = if children.len() == 2 {
+            body.prop_flat_map(move |v| {
+                let b: BoxedStrategy<Operator> = (
+                    reg_range.clone(),
+                    reg_range.clone(),
+                    Just(Rc::clone(&children[0])),
+                    Just(Rc::clone(&children[1])),
+                )
+                    .prop_flat_map(|(reg1, reg2, lb1, lb2)| arbitrary_branch(reg1, reg2, lb1, lb2))
+                    .boxed();
+                b.prop_map(move |b| v.iter().cloned().chain(std::iter::once(b)).collect())
+            })
+            .boxed()
+        } else if children.len() == 1 {
+            body.prop_map(move |v| {
+                v.into_iter()
+                    .chain(std::iter::once(Operator::J(Rc::clone(&children[0]))))
+                    .collect()
+            })
+            .boxed()
+        } else {
+            body.boxed()
+        };
+
+        body
+    }
+
+    fn generate_linear(
+        reg_range: u32,
+        block_len: usize,
+        mut worklist: VecDeque<Rc<str>>,
+        potential_blocks: Vec<Rc<str>>,
+        done: HashSet<Rc<str>>,
+        result: Vec<Vec<Operator>>,
+    ) -> BoxedStrategy<Vec<Vec<Operator>>> {
+        if let Some(nxt) = worklist.pop_front() {
+            let copy_nxt = Rc::clone(&nxt);
+            (
+                proptest::collection::vec(proptest::sample::select(potential_blocks.clone()), 0..3)
+                    .prop_filter("try to branch to self", move |vals| {
+                        !vals.contains(&copy_nxt)
+                    }),
+                Just(worklist),
+                Just(potential_blocks),
+                Just(done),
+                Just(result),
+                Just(nxt),
+            )
+                .prop_flat_map(
+                    move |(vals, mut worklist, potential_blocks, mut done, result, nxt)| {
+                        for lb in &vals {
+                            if !done.contains(lb) {
+                                worklist.push_back(Rc::clone(lb));
+                                done.insert(Rc::clone(lb));
+                            }
+                        }
+                        let res = (
+                            Just(result),
+                            arbitrary_block(block_len, vals, 0_u32..reg_range),
+                        )
+                            .prop_map(move |(result, new)| {
+                                result
+                                    .into_iter()
+                                    .chain(std::iter::once(
+                                        std::iter::once(Operator::Label(Rc::clone(&nxt)))
+                                            .chain(new.into_iter())
+                                            .collect::<Vec<_>>(),
+                                    ))
+                                    .collect::<Vec<_>>()
+                            });
+                        (Just(worklist), Just(potential_blocks), Just(done), res).prop_flat_map(
+                            move |(worklist, potential_blocks, done, res)| {
+                                generate_linear(
+                                    reg_range,
+                                    block_len,
+                                    worklist,
+                                    potential_blocks,
+                                    done,
+                                    res,
+                                )
+                            },
+                        )
+                    },
+                )
+                .boxed()
+        } else {
+            Just(result).boxed()
+        }
+    }
+    impl Arbitrary for CFG<Operator> {
+        type Parameters = (usize, u32, usize);
+
+        fn arbitrary_with((len, reg_range, block_len): Self::Parameters) -> Self::Strategy {
+            let potential_blocks: Vec<Rc<str>> = (0..len)
+                .map(|n| format!("LABEL_{}", n))
+                .map(|s| Rc::from(&s[..]))
+                .collect();
+            let mut worklist: VecDeque<Rc<str>> = VecDeque::new();
+            worklist.push_back(Rc::from("ENTRY"));
+            let done: HashSet<Rc<str>> = HashSet::new();
+
+            let linear = generate_linear(
+                reg_range,
+                block_len,
+                worklist,
+                potential_blocks,
+                done,
+                Vec::new(),
+            )
+            .prop_map(move |result| result.into_iter().flatten().skip(1).collect::<Vec<_>>());
+
+            let cfg = linear.prop_map(move |linear| {
+                CFG::from_linear(linear, (0..=reg_range).collect::<Vec<_>>(), reg_range + 1)
+            });
+
+            cfg.boxed()
+        }
+
+        type Strategy = BoxedStrategy<CFG<Operator>>;
     }
 }
 

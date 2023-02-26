@@ -13,6 +13,9 @@ lrpar = "0.13.1"
 [dependencies.parser_defs]
 path = "parser"
 
+[dev-dependencies]
+proptest = "1.1.0"
+
 [build-dependencies]
 cfgrammar = "0.13.1"
 lrlex = "0.13.1"
