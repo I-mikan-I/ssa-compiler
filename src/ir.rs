@@ -810,12 +810,15 @@ impl CFG<Operator> {
                 *rec = *names[&old].last().unwrap();
             }
         }
+        let mut locals = HashMap::new();
         macro_rules! update_name {
             ($name:expr) => {
                 #[allow(clippy::unnecessary_mut_passed)]
                 if globals.contains($name) {
                     let old = *$name;
                     *$name = *names[&old].last().unwrap();
+                } else if let Some(&v) = locals.get($name) {
+                    *$name = v;
                 }
             };
         }
@@ -825,6 +828,10 @@ impl CFG<Operator> {
                     let old = *$name;
                     *(names.get_mut(&old).unwrap().last_mut().unwrap()) = generator.next_reg();
                     *$name = *names[&old].last().unwrap();
+                } else {
+                    let old = *$name;
+                    *$name = generator.next_reg();
+                    locals.insert(old, *$name);
                 }
             };
         }
@@ -869,6 +876,7 @@ impl CFG<Operator> {
                 _ => {}
             }
         }
+        std::mem::take(&mut locals);
         for &child in self.blocks[current].children.iter() {
             for phi in &mut phis[child] {
                 if let SSAOperator::Phi(_, args) = phi {
@@ -1034,6 +1042,8 @@ mod test {
     use proptest::prop_oneof;
     use proptest::strategy::Strategy;
 
+    use crate::util::SheafTable;
+
     use super::Operator;
     use super::CFG;
     use std::collections::HashSet;
@@ -1125,12 +1135,130 @@ mod test {
     }
 
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(20))]
         #[test]
-        fn test_strategy(cfg in any_with::<CFG<Operator>>((20, 20, 20))) {
-            println!("{}", cfg.to_dot());
+        fn test_reachable(cfg in any_with::<CFG<Operator>>((20, 20, 20))) {
+            let dot = cfg.to_dot();
+            let mut found = HashSet::new();
+            let mut visited = HashSet::new();
+            let mut queue = VecDeque::new();
+            queue.push_back(0);
+            while let Some(nxt) = queue.pop_front() {
+                visited.insert(nxt);
+                found.insert(nxt);
+                queue.extend(cfg.blocks[nxt].children.iter().filter(|child| !visited.contains(child)));
+            }
+            assert!(found.len() == cfg.blocks.len(), "unreachable block in {dot}\n");
+        }
+
+        #[test]
+        fn test_ssa_one_definition(cfg in any_with::<CFG<Operator>>((20, 20, 20))) {
+            let dot = cfg.to_dot();
             let ssa = cfg.to_ssa();
-            println!("{}", ssa.to_dot());
+            let ssa_dot = ssa.to_dot();
+            let mut defined = HashSet::new();
+            for block in ssa.blocks {
+                for op in block.body {
+                    match op {
+                        crate::ir::SSAOperator::IROp(op) => match op {
+                            Operator::Add(x, _, _)  |
+                            Operator::Sub(x, _, _)  |
+                            Operator::Mult(x, _, _)  |
+                            Operator::Div(x, _, _)  |
+                            Operator::And(x, _, _)  |
+                            Operator::Or(x, _, _)  |
+                            Operator::Mv(x, _)  |
+                            Operator::Xor(x, _, _)  |
+                            Operator::Load(x, _, _)  |
+                            Operator::Store(x, _, _)  |
+                            Operator::La(x, _)  |
+                            Operator::Li(x, _)  |
+                            Operator::Slt(x, _, _)  |
+                            Operator::Call(x, _, _)  |
+                            Operator::GetParameter(x, _) =>  {
+                                assert!(!defined.contains(&x), "original: {dot}\n ssa: {ssa_dot}\n");
+                                defined.insert(x);
+                            },
+                            _ => {}
+                        },
+                        crate::ir::SSAOperator::Phi(x, _) => {
+                            assert!(!defined.contains(&x), "original: {dot}\n ssa: {ssa_dot}\n");
+                            defined.insert(x);
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn test_ssa_reaching_definition(cfg in any_with::<CFG<Operator>>((20, 20, 20))) {
+            fn check_reaching_recursive(ssa: & CFG<super::SSAOperator>, names: &mut SheafTable<super::VReg, bool>, current: usize) {
+                let block = &ssa.blocks[current];
+                names.push();
+                macro_rules! check_def {
+                    ($name:expr) => {
+                        assert!(names.get($name).is_some());
+                    }
+                }
+
+                macro_rules! create_def {
+                    ($name:expr) => {
+                        names.insert(*$name, true);
+                    }
+                }
+                for op in &block.body {
+                    match op {
+                        crate::ir::SSAOperator::IROp(op) => match op {
+                            Operator::Add(x, y, z)
+                            | Operator::Sub(x, y, z)
+                            | Operator::Mult(x, y, z)
+                            | Operator::Div(x, y, z)
+                            | Operator::Xor(x, y, z)
+                            | Operator::Slt(x, y, z)
+                            | Operator::Load(x, y, z)
+                            | Operator::Store(x, y, z)
+                            | Operator::And(x, y, z)
+                            | Operator::Or(x, y, z) => {
+                                check_def!(y);
+                                check_def!(z);
+                                create_def!(x);
+                            }
+                            Operator::Li(x, _) | Operator::La(x, _) | Operator::GetParameter(x, _) => {
+                                create_def!(x);
+                            }
+                            Operator::Mv(x, y) => {
+                                check_def!(y);
+                                create_def!(x);
+                            }
+                            Operator::Bgt(x, y, _, _)
+                            | Operator::Bl(x, y, _, _)
+                            | Operator::Beq(x, y, _, _) => {
+                                check_def!(y);
+                                check_def!(x);
+                            }
+                            Operator::Call(x, _, z) => {
+                                for name in z {
+                                    check_def!(name);
+                                }
+                                create_def!(x);
+                            }
+                            Operator::Return(x) => {
+                                check_def!(x);
+                            }
+                            _ => {}
+                                    },
+                        crate::ir::SSAOperator::Phi(x, _) => {
+                            create_def!(x);
+                        },
+                    }
+                }
+                for &child in &block.idom_of {
+                    check_reaching_recursive(ssa, names, child);
+                }
+                names.pop();
+            }
+            let ssa = cfg.to_ssa();
+            let mut names = SheafTable::new();
+            check_reaching_recursive(&ssa, &mut names, 0);
         }
     }
 
@@ -1327,5 +1455,3 @@ mod test {
         type Strategy = BoxedStrategy<CFG<Operator>>;
     }
 }
-
-//todo: label could be first instr!

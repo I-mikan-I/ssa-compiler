@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 4834516e2c85be8ba07c2e7ba34cf8a57eec7a278c62140c8777d2ed1ec5c9e7 # shrinks to cfg = CFG { blocks: [Block { label: "ENTRY", body: [GetParameter(0, 0), GetParameter(1, 1), GetParameter(2, 2), GetParameter(3, 3), GetParameter(4, 4), GetParameter(5, 5), GetParameter(6, 6), GetParameter(7, 7), GetParameter(8, 8), GetParameter(9, 9), GetParameter(10, 10), GetParameter(11, 11), GetParameter(12, 12), GetParameter(13, 13), GetParameter(14, 14), GetParameter(15, 15), GetParameter(16, 16), GetParameter(17, 17), GetParameter(18, 18), GetParameter(19, 19), GetParameter(20, 20), Nop, Nop, Nop, Mult(0, 0, 0), La(9, "yboaberwybqrzskur"), Load(7, 7, 13), Load(12, 4, 4), Mv(4, 8), Store(16, 4, 18), Load(14, 19, 18), Nop, Slt(7, 19, 19), Load(16, 14, 6), Load(0, 0, 8), Load(6, 14, 18), Div(7, 2, 19), Slt(7, 9, 4), Slt(19, 15, 11), Store(6, 19, 13), Div(13, 7, 15)], preds: [], children: [], idom: None, idom_of: [], mark: false }], entry: 0, max_reg: 21 }
