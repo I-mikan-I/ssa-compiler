@@ -154,7 +154,7 @@ mod tests {
         );
         assert_eq!(&params[..], &[0][..]);
 
-        let mut cfg = CFG::from_linear(body, fun.get_params(), fun.get_max_reg());
+        let cfg = CFG::from_linear(body, fun.get_params(), fun.get_max_reg());
         println!("{:?}", cfg);
         assert_eq!(
             cfg.get_block(0).body,

@@ -1193,10 +1193,11 @@ mod test {
         fn test_ssa_reaching_definition(cfg in any_with::<CFG<Operator>>((20, 20, 20))) {
             fn check_reaching_recursive(ssa: & CFG<super::SSAOperator>, names: &mut SheafTable<super::VReg, bool>, current: usize) {
                 let block = &ssa.blocks[current];
+                let ssa_dot = ssa.to_dot();
                 names.push();
                 macro_rules! check_def {
                     ($name:expr) => {
-                        assert!(names.get($name).is_some());
+                        assert!(names.get($name).is_some(), "\nssa: {ssa_dot}\nin block: {}\nchecking name: {}\n", block.label, *$name);
                     }
                 }
 
