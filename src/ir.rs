@@ -91,7 +91,7 @@ use std::{
 
 use crate::util::SheafTable;
 
-type VReg = u32;
+pub type VReg = u32;
 struct VRegGenerator(u32, u32, String);
 impl VRegGenerator {
     pub fn starting_at_reg(at: u32) -> Self {
@@ -583,8 +583,25 @@ impl<O> CFG<O> {
     pub fn get_block(&self, i: usize) -> &Block<O> {
         self.blocks.get(i).unwrap()
     }
+    pub fn len(&self) -> usize {
+        self.blocks.len()
+    }
     pub fn get_block_mut(&mut self, i: usize) -> &mut Block<O> {
         self.blocks.get_mut(i).unwrap()
+    }
+    /// Returns the indices of a reverse post-order walk on the dominator tree.
+    /// Last() constitutes first element;
+    pub fn get_dom_rpo(&self) -> Vec<usize> {
+        fn postorder<O>(s: &CFG<O>, current: usize, acc: &mut Vec<usize>) {
+            let block = &s.blocks[current];
+            for &child in &block.idom_of {
+                postorder(s, child, acc);
+            }
+            acc.push(current);
+        }
+        let mut res = Vec::with_capacity(self.len());
+        postorder(self, 0, &mut res);
+        res
     }
 }
 impl<O> CFG<O>

@@ -27,3 +27,4 @@ path = "parser"
 [features]
 
 print-cfgs = []
+print-gvn = []

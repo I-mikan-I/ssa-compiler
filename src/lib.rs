@@ -179,8 +179,6 @@ mod tests {
         assert_eq!(cfg.get_block(5).idom.unwrap(), 2);
         assert_eq!(cfg.get_block(6).children, vec![]);
         assert_eq!(cfg.get_block(6).idom.unwrap(), 1);
-        //DEBUG
-        cfg.to_ssa();
     }
 
     #[test]
