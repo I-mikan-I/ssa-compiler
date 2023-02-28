@@ -89,17 +89,19 @@ use std::{
     rc::Rc,
 };
 
-use crate::ssa::{Linear, SSA};
 use crate::util::SheafTable;
 
 type VReg = u32;
-struct VRegGenerator(u32, u32);
+struct VRegGenerator(u32, u32, String);
 impl VRegGenerator {
-    pub fn starting_at(at: u32) -> Self {
-        Self(at, 0)
+    pub fn starting_at_reg(at: u32) -> Self {
+        Self(at, 0, "_LABEL_".into())
+    }
+    pub fn with_prefix(prefix: String) -> Self {
+        Self(0, 0, prefix)
     }
     pub fn new() -> Self {
-        Self(0, 0)
+        Self(0, 0, "_LABEL_".into())
     }
     pub fn next_reg(&mut self) -> u32 {
         let res = self.0;
@@ -107,7 +109,7 @@ impl VRegGenerator {
         res
     }
     pub fn next_label(&mut self) -> String {
-        let res = format!("_LABEL_{}", self.1);
+        let res = format!("{}{}", self.2, self.1);
         self.1 += 1;
         res
     }
@@ -529,35 +531,6 @@ fn translate_block(
     }
 }
 
-pub struct IRLinear(Function<Vec<Operator>>);
-impl IRLinear {
-    pub fn get_mut(&mut self) -> &mut Function<Vec<Operator>> {
-        &mut self.0
-    }
-}
-pub struct IRSSA(Function<CFG<SSAOperator>>);
-impl SSA for IRSSA {
-    type Operation = Operator;
-
-    type LinearReg = VReg;
-
-    type SSAReg = VReg;
-}
-
-impl Linear for IRLinear {
-    type Operation = Operator;
-
-    type LinearReg = VReg;
-
-    type SSaReg = VReg;
-
-    type AsSSA = IRSSA;
-
-    fn transpile_ssa(&self) -> Self::AsSSA {
-        todo!()
-    }
-}
-
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum SSAOperator {
     IROp(Operator),
@@ -573,7 +546,6 @@ pub struct Block<O> {
     /// None if entry node, else Some.
     pub idom: Option<usize>,
     pub idom_of: Vec<usize>,
-    mark: bool,
 }
 
 impl<O> Block<O> {
@@ -585,7 +557,6 @@ impl<O> Block<O> {
             children: Vec::new(),
             idom: None,
             idom_of: Vec::new(),
-            mark: false,
         }
     }
     fn into_other<T>(self, body: Vec<T>) -> Block<T> {
@@ -596,7 +567,6 @@ impl<O> Block<O> {
             children: self.children,
             idom: self.idom,
             idom_of: self.idom_of,
-            mark: self.mark,
         }
     }
 }
@@ -605,6 +575,17 @@ pub struct CFG<O> {
     blocks: Vec<Block<O>>,
     entry: usize,
     max_reg: VReg,
+}
+impl<O> CFG<O> {
+    pub fn get_entry(&self) -> usize {
+        self.entry
+    }
+    pub fn get_block(&self, i: usize) -> &Block<O> {
+        self.blocks.get(i).unwrap()
+    }
+    pub fn get_block_mut(&mut self, i: usize) -> &mut Block<O> {
+        self.blocks.get_mut(i).unwrap()
+    }
 }
 impl<O> CFG<O>
 where
@@ -651,12 +632,6 @@ label=\"dom tree\"
     }
 }
 impl CFG<Operator> {
-    pub fn get_entry(&self) -> &Block<Operator> {
-        self.blocks.get(self.entry).unwrap()
-    }
-    pub fn get_block(&self, i: usize) -> &Block<Operator> {
-        self.blocks.get(i).unwrap()
-    }
     fn bfs_reverse(&self, total_blocks: usize, block: usize) -> Vec<usize> {
         let mut outputs = vec![usize::MAX; total_blocks];
         outputs[block] = 0;
@@ -741,14 +716,21 @@ impl CFG<Operator> {
             .chain(std::mem::take(&mut blocks[0].body).into_iter())
             .collect();
 
-        let mut doms = vec![HashSet::from_iter(0..blocks.len()); blocks.len()];
+        let mut changed = true;
+        let mut result = Self {
+            blocks,
+            entry: 0,
+            max_reg,
+        };
+
+        result.split_critical();
+        let mut doms = vec![HashSet::from_iter(0..result.blocks.len()); result.blocks.len()];
         doms[0] = HashSet::from([0]);
 
-        let mut changed = true;
         while changed {
             changed = false;
 
-            for (i, block) in blocks.iter().enumerate() {
+            for (i, block) in result.blocks.iter().enumerate() {
                 let mut new: HashSet<_> = if let Some(fst) = block.preds.first() {
                     block
                         .preds
@@ -767,11 +749,7 @@ impl CFG<Operator> {
                 }
             }
         }
-        let mut result = Self {
-            blocks,
-            entry: 0,
-            max_reg,
-        };
+
         let apsp_reverse = result.apsp_reverse();
 
         for (i, mut set) in doms.into_iter().enumerate() {
@@ -788,6 +766,51 @@ impl CFG<Operator> {
             println!("{}", result.to_dot());
         }
         result
+    }
+    fn split_critical(&mut self) {
+        let mut gen = VRegGenerator::with_prefix("_CRITICAL_".into());
+        let mut to_append = vec![];
+        let mut current_idx = self.blocks.len();
+        for i in 0..self.blocks.len() {
+            if self.blocks[i].children.len() <= 1 {
+                continue;
+            }
+            let block = &self.blocks[i];
+            for (k, child_) in block.children.clone().into_iter().enumerate() {
+                if self.blocks[child_].preds.len() > 1 {
+                    let label: Rc<str> = gen.next_label().into();
+                    let child_label = self.blocks[child_].label.clone();
+                    let block = &mut self.blocks[i];
+                    if let Some(
+                        Operator::Bgt(_, _, s1, s2)
+                        | Operator::Bl(_, _, s1, s2)
+                        | Operator::Beq(_, _, s1, s2),
+                    ) = block.body.last_mut()
+                    {
+                        if *s1 == child_label {
+                            *s1 = Rc::clone(&label);
+                        } else if *s2 == child_label {
+                            *s2 = Rc::clone(&label);
+                        }
+                    }
+
+                    let mut new = Block::empty(&label);
+                    let child = &mut self.blocks[child_];
+                    new.children = vec![child_];
+                    new.preds = vec![i];
+                    new.body = vec![Operator::J(Rc::clone(&child.label))];
+                    to_append.push(new);
+                    child.preds.iter_mut().for_each(|pred| {
+                        if *pred == i {
+                            *pred = current_idx;
+                        }
+                    });
+                    self.blocks[i].children[k] = current_idx;
+                    current_idx += 1;
+                }
+            }
+        }
+        self.blocks.append(&mut to_append);
     }
     fn rename_blocks(
         &mut self,
@@ -916,7 +939,7 @@ impl CFG<Operator> {
                 }
             }
         }
-        let mut generator = VRegGenerator::starting_at(self.max_reg + 1);
+        let mut generator = VRegGenerator::starting_at_reg(self.max_reg + 1);
         let mut names: HashMap<VReg, Vec<VReg>> = HashMap::new();
         self.rename_blocks(0, &globals, &mut names, &mut generator, &mut phis);
         let new_blocks: Vec<Block<SSAOperator>> = phis
@@ -1151,6 +1174,22 @@ mod test {
         }
 
         #[test]
+        fn test_correct_labels(cfg in any_with::<CFG<Operator>>((20, 20, 20))) {
+            for block in &cfg.blocks {
+                if let Some(Operator::Bgt(_, _, s1, s2) | Operator::Bl(_, _, s1, s2) | Operator::Beq(_, _, s1, s2)) = block.body.last() {
+                    assert!(block.children.len() <= 2 && block.children.len() >= 1, "{}", cfg.to_dot());
+                    for &child in &block.children {
+                        let child = &cfg.blocks[child];
+                        assert!(child.label == *s1 || child.label == *s2);
+                    }
+                } else if let Some(Operator::J(s1)) = block.body.last() {
+                    assert_eq!(block.children.len(), 1);
+                    assert_eq!(&cfg.blocks[block.children[0]].label, s1);
+                }
+            }
+        }
+
+        #[test]
         fn test_ssa_one_definition(cfg in any_with::<CFG<Operator>>((20, 20, 20))) {
             let dot = cfg.to_dot();
             let ssa = cfg.to_ssa();
@@ -1261,6 +1300,28 @@ mod test {
             let mut names = SheafTable::new();
             check_reaching_recursive(&ssa, &mut names, 0);
         }
+
+        #[test]
+        fn test_ssa_non_critical_edge(cfg in any_with::<CFG<Operator>>((20, 20, 20))) {
+            let ssa = cfg.to_ssa();
+
+            for block in &ssa.blocks {
+                if block.children.len() > 1 {
+                    for &child in &block.children {
+                        let child = &ssa.blocks[child];
+                        assert!(child.preds.len() <= 1);
+                    }
+                }
+            }
+        }
+
+        // #[test]
+        // fn test_ssa_print(cfg in any_with::<CFG<Operator>>((20, 20, 30))) {
+        //     println!("\nLinear:\n{}\n", cfg.to_dot());
+        //     let ssa = cfg.to_ssa();
+        //     println!("\nSSA:\n{}\n", ssa.to_dot());
+        // }
+
     }
 
     fn arbitrary_stmt(
