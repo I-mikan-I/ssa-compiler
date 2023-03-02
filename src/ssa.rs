@@ -88,7 +88,7 @@ pub mod gvn_pre {
             op: &SSAOperator,
             exp_gen: &mut LinkedList<(Value, Expression)>,
             added_exps: &mut HashSet<Value>,
-        ) -> Option<(Value, Option<VReg>, Expression)> {
+        ) -> Result<(Value, Option<VReg>, Expression), Option<VReg>> {
             macro_rules! value_regs {
                 ($($x: expr),+) => {
                 {
@@ -114,77 +114,84 @@ pub mod gvn_pre {
                         let res = Expression::Plus(x, y).canon();
                         let new = self.maybe_insert(res.clone());
                         self.insert_with(Expression::Reg(*rec), new);
-                        Some((new, Some(*rec), res))
+                        Ok((new, Some(*rec), res))
                     }
                     Operator::Sub(rec, x, y) => {
                         let (x, y) = value_regs!(x, y);
                         let res = Expression::Sub(x, y).canon();
                         let new = self.maybe_insert(Expression::Sub(x, y));
                         self.insert_with(Expression::Reg(*rec), new);
-                        Some((new, Some(*rec), res))
+                        Ok((new, Some(*rec), res))
                     }
                     Operator::Mult(rec, x, y) => {
                         let (x, y) = value_regs!(x, y);
                         let res = Expression::Mult(x, y).canon();
                         let new = self.maybe_insert(Expression::Mult(x, y));
                         self.insert_with(Expression::Reg(*rec), new);
-                        Some((new, Some(*rec), res))
+                        Ok((new, Some(*rec), res))
                     }
                     Operator::Div(rec, x, y) => {
                         let (x, y) = value_regs!(x, y);
                         let res = Expression::Div(x, y).canon();
                         let new = self.maybe_insert(Expression::Div(x, y));
                         self.insert_with(Expression::Reg(*rec), new);
-                        Some((new, Some(*rec), res))
+                        Ok((new, Some(*rec), res))
                     }
                     Operator::And(rec, x, y) => {
                         let (x, y) = value_regs!(x, y);
                         let res = Expression::And(x, y).canon();
                         let new = self.maybe_insert(Expression::And(x, y));
                         self.insert_with(Expression::Reg(*rec), new);
-                        Some((new, Some(*rec), res))
+                        Ok((new, Some(*rec), res))
                     }
                     Operator::Or(rec, x, y) => {
                         let (x, y) = value_regs!(x, y);
                         let res = Expression::Or(x, y).canon();
                         let new = self.maybe_insert(Expression::Or(x, y));
                         self.insert_with(Expression::Reg(*rec), new);
-                        Some((new, Some(*rec), res))
+                        Ok((new, Some(*rec), res))
                     }
                     Operator::Xor(rec, x, y) => {
                         let (x, y) = value_regs!(x, y);
                         let res = Expression::Xor(x, y).canon();
                         let new = self.maybe_insert(Expression::Xor(x, y));
                         self.insert_with(Expression::Reg(*rec), new);
-                        Some((new, Some(*rec), res))
+                        Ok((new, Some(*rec), res))
                     }
                     Operator::Li(rec, x) => {
                         let res = Expression::Immediate(*x).canon();
                         let new = self.maybe_insert(Expression::Immediate(*x));
                         self.insert_with(Expression::Reg(*rec), new);
-                        Some((new, Some(*rec), res))
+                        Ok((new, Some(*rec), res))
                     }
                     Operator::Mv(rec, x) => {
                         let x = value_regs!(x);
                         let res = Expression::Mv(x).canon();
                         let new = self.maybe_insert(Expression::Mv(x));
                         self.insert_with(Expression::Reg(*rec), new);
-                        Some((new, Some(*rec), res))
+                        Ok((new, Some(*rec), res))
                     }
                     Operator::Return(x) => {
                         let new = value_regs!(x);
-                        Some((new, None, Expression::Reg(*x)))
+                        Ok((new, None, Expression::Reg(*x)))
                     }
-                    _ => None,
+                    //unsupported; kill sets
+                    Operator::Load(x, _, _)
+                    | Operator::Store(x, _, _)
+                    | Operator::La(x, _)
+                    | Operator::Slt(x, _, _)
+                    | Operator::Call(x, _, _)
+                    | Operator::GetParameter(x, _) => Err(Some(*x)),
+                    _ => Err(None),
                 },
                 SSAOperator::Phi(rec, operands) => {
                     let res = Expression::Phi(operands.clone()).canon();
                     let new = self.maybe_insert(Expression::Phi(operands.clone()));
                     self.insert_with(Expression::Reg(*rec), new);
-                    return Some((new, Some(*rec), res)); //skip adding to exp_gen
+                    return Ok((new, Some(*rec), res)); //skip adding to exp_gen
                 }
             };
-            if let Some((val, _, exp)) = &res {
+            if let Ok((val, _, exp)) = &res {
                 if !added_exps.contains(val) {
                     added_exps.insert(*val);
                     exp_gen.push_back((*val, exp.clone()));
@@ -202,22 +209,24 @@ pub mod gvn_pre {
         current: usize,
         exp_gen: &mut Vec<LinkedList<(Value, Expression)>>,
         phi_gen: &mut Vec<HashMap<Value, VReg>>,
-        tmp_gen: &mut Vec<HashMap<Value, Expression>>,
+        tmp_gen: &mut Vec<HashSet<VReg>>,
         leaders: &mut Vec<HashMap<Value, VReg>>,
         table: &mut ValueTable,
     ) {
         let block = cfg.get_block(current);
         let mut added_exps = HashSet::new();
         for op in &block.body {
-            if let Some((val, Some(reg), exp)) =
-                table.maybe_insert_op(op, &mut exp_gen[current], &mut added_exps)
-            {
-                leaders[current].entry(val).or_insert(reg);
-                if let Expression::Phi(_) = exp {
-                    phi_gen[current].entry(val).or_insert(reg);
-                } else {
-                    tmp_gen[current].entry(val).or_insert(exp);
+            match table.maybe_insert_op(op, &mut exp_gen[current], &mut added_exps) {
+                Ok((val, Some(reg), exp)) => {
+                    leaders[current].entry(val).or_insert(reg);
+                    if let Expression::Phi(_) = exp {
+                        phi_gen[current].entry(val).or_insert(reg);
+                    }
                 }
+                Err(Some(killed)) => {
+                    tmp_gen[current].insert(killed);
+                }
+                _ => {}
             }
         }
         for dom_child in block.idom_of.clone() {
@@ -233,7 +242,7 @@ pub mod gvn_pre {
         antic_out: &mut Vec<LinkedList<(Value, Expression)>>,
         antic_in: &mut Vec<LinkedList<(Value, Expression)>>,
         exp_gen: &Vec<LinkedList<(Value, Expression)>>,
-        tmp_gen: &Vec<HashMap<Value, Expression>>,
+        tmp_gen: &Vec<HashSet<VReg>>,
         phi_gen: &Vec<HashMap<Value, VReg>>,
         value_table: &mut ValueTable,
     ) {
@@ -321,9 +330,9 @@ pub mod gvn_pre {
         }
 
         let mut killed = HashSet::new();
-        let cleaned = antic_out[current]
+        let cleaned = exp_gen[current]
             .iter()
-            .chain(exp_gen[current].iter())
+            .chain(antic_out[current].iter())
             .filter_map(|(val, exp)| {
                 for dependency in exp.depends_on() {
                     if killed.contains(&dependency) {
@@ -332,16 +341,18 @@ pub mod gvn_pre {
                     }
                 }
                 if let Expression::Reg(r) = exp {
-                    if value_table.blackbox_regs.contains(r) {
+                    if tmp_gen[current].contains(r) {
                         killed.insert(*val);
                         return None;
                     }
                 }
-                if let Some(updated) = tmp_gen[current].get(val) {
-                    Some((*val, updated.clone()))
-                } else {
-                    Some((*val, exp.clone()))
-                }
+                Some((*val, exp.clone()))
+                // not needed because exp already contains and overwrites any regs in antic_out!
+                // if let Some(updated) = tmp_gen[current].get(val) {
+                //     Some((*val, updated.clone()))
+                // } else {
+                //     Some((*val, exp.clone()))
+                // }
             });
         let mut added = HashSet::new();
         let mut result = LinkedList::new();
@@ -365,7 +376,7 @@ pub mod gvn_pre {
         while let Some(next) = rpo.pop() {
             let block = cfg.get_block(next);
             for op in &block.body {
-                value_table.maybe_insert_op(op, &mut LinkedList::new(), &mut HashSet::new());
+                let _ = value_table.maybe_insert_op(op, &mut LinkedList::new(), &mut HashSet::new());
             }
         }
 
@@ -388,11 +399,12 @@ pub mod gvn_pre {
     ) -> (
         Vec<HashMap<Value, VReg>>,
         Vec<LinkedList<(Value, Expression)>>,
+        ValueTable,
     ) {
         let mut value_table = generate_value_table(cfg);
 
         let mut exp_gen = vec![LinkedList::default(); cfg.len()];
-        let mut tmp_gen = vec![HashMap::default(); cfg.len()];
+        let mut tmp_gen = vec![HashSet::default(); cfg.len()];
         let mut phi_gen = vec![HashMap::default(); cfg.len()];
         let mut leaders = vec![HashMap::default(); cfg.len()];
         build_sets_phase1(
@@ -432,11 +444,13 @@ pub mod gvn_pre {
         {
             println! {"antic_in: \n{:?}\n", antic_in};
         }
-        (leaders, antic_in)
+        (leaders, antic_in, value_table)
     }
 
     #[cfg(test)]
     mod tests {
+        use std::rc::Rc;
+
         use super::*;
         use crate::ir::CFG;
 
@@ -495,42 +509,436 @@ pub mod gvn_pre {
         }
 
         #[test]
-        fn phase1() {
-            let input = "
-        myvar3 :: Bool = false;
-        lambda myfun(myvar3 :: Int) :: Int {
-            myvar4 :: Int = 0;
-            i :: Int = 100;
-            while (i >= 0) do {
-                if i / 2 / 2 / 2 < 2 then {
-                    myvar4 = myvar4 * 3;
-                } else {
-                    myvar4 = myvar4 / 2;
-                }
-            }
-           return myvar4;
-        }
-        myvar2 :: Bool = true;
-        ";
-            let result = crate::parser::parse(&input);
-            assert!(result.1.is_empty());
-            assert!(result.0.is_some());
-            assert!(result.0.as_ref().unwrap().is_ok());
-            let p = result.0.unwrap().unwrap();
-            let res = crate::parser::validate(&p);
-            assert!(res.is_none(), "{}", res.unwrap());
-
-            let mut context = crate::ir::Context::new();
-            crate::ir::translate_program(&mut context, &p);
-            let funs = context.get_functions();
-            let fun = funs.get("myfun").unwrap();
-            let body = fun.get_body();
+        fn build_sets_simple() {
+            let body = vec![
+                Operator::Li(1, 3),
+                Operator::Li(2, 5),
+                Operator::Add(3, 1, 2),
+            ];
             println!("{}", crate::ir::Displayable(&body[..]));
 
-            let cfg = CFG::from_linear(body, fun.get_params(), fun.get_max_reg());
+            let cfg = CFG::from_linear(body, vec![], 3);
             let mut ssa = cfg.to_ssa();
-            println!("{}", ssa.to_dot());
-            build_sets(&mut ssa);
+            let (leaders, antic_in, mut table) = build_sets(&mut ssa);
+            assert_eq!(leaders.len(), 1);
+            let value_3 = table.maybe_insert(Expression::Immediate(3));
+            let value_5 = table.maybe_insert(Expression::Immediate(5));
+            let value_sum = table.maybe_insert(Expression::Plus(value_5, value_3));
+            assert_eq!(*leaders[0].get(&value_3).unwrap(), 4);
+            assert_eq!(*leaders[0].get(&value_5).unwrap(), 5);
+            assert_eq!(*leaders[0].get(&value_sum).unwrap(), 6);
+
+            assert_eq!(
+                Vec::from_iter(antic_in[0].iter().cloned()),
+                &[
+                    (value_3, Expression::Immediate(3)),
+                    (value_5, Expression::Immediate(5)),
+                    (value_sum, Expression::Plus(value_3, value_5))
+                ]
+            );
+        }
+
+        #[test]
+        fn build_sets_trans() {
+            let l1: Rc<str> = "Label1".into();
+            let body = vec![
+                Operator::Li(1, 3),
+                Operator::Li(2, 5),
+                Operator::Add(3, 1, 2),
+                Operator::J(Rc::clone(&l1)),
+                Operator::Label(Rc::clone(&l1)),
+                Operator::Sub(4, 3, 2),
+                Operator::Xor(5, 4, 3),
+                Operator::Return(5),
+            ];
+            println!("{}", crate::ir::Displayable(&body[..]));
+
+            let cfg = CFG::from_linear(body, vec![], 3);
+            let mut ssa = cfg.to_ssa();
+            let (leaders, antic_in, mut table) = build_sets(&mut ssa);
+            assert_eq!(leaders.len(), 2);
+            assert_eq!(antic_in.len(), 2);
+            let value_3 = table.maybe_insert(Expression::Immediate(3));
+            let value_5 = table.maybe_insert(Expression::Immediate(5));
+            let value_sum = table.maybe_insert(Expression::Plus(value_3, value_5));
+            let value_sub = table.maybe_insert(Expression::Sub(value_sum, value_5));
+            let value_xor = table.maybe_insert(Expression::Xor(value_sub, value_sum));
+            assert_eq!(leaders[0].len(), 3);
+            assert_eq!(*leaders[0].get(&value_3).unwrap(), 4);
+            assert_eq!(*leaders[0].get(&value_5).unwrap(), 5);
+            assert_eq!(*leaders[0].get(&value_sum).unwrap(), 6);
+            assert_eq!(leaders[1].len(), 5);
+            assert_eq!(*leaders[1].get(&value_3).unwrap(), 4);
+            assert_eq!(*leaders[1].get(&value_5).unwrap(), 5);
+            assert_eq!(*leaders[1].get(&value_sum).unwrap(), 6);
+            assert_eq!(*leaders[1].get(&value_sub).unwrap(), 7);
+            assert_eq!(*leaders[1].get(&value_xor).unwrap(), 8);
+
+            assert_eq!(
+                Vec::from_iter(antic_in[0].iter().cloned()),
+                &[
+                    (value_3, Expression::Immediate(3)),
+                    (value_5, Expression::Immediate(5)),
+                    (value_sum, Expression::Plus(value_3, value_5)),
+                    (value_sub, Expression::Sub(value_sum, value_5)),
+                    (value_xor, Expression::Xor(value_sum, value_sub)),
+                ]
+            );
+            assert_eq!(
+                Vec::from_iter(antic_in[1].iter().cloned()),
+                &[
+                    (value_sum, Expression::Reg(6)),
+                    (value_5, Expression::Reg(5)),
+                    (value_sub, Expression::Sub(value_sum, value_5)),
+                    (value_xor, Expression::Xor(value_sum, value_sub)),
+                ]
+            );
+        }
+
+        #[test]
+        fn build_sets_trans_kill() {
+            let l1: Rc<str> = "Label1".into();
+            let body = vec![
+                Operator::Li(1, 3),
+                Operator::Li(2, 5),
+                Operator::Slt(3, 1, 2),
+                Operator::J(Rc::clone(&l1)),
+                Operator::Label(Rc::clone(&l1)),
+                Operator::Sub(4, 3, 2),
+                Operator::Xor(5, 4, 3),
+                Operator::Return(5),
+            ];
+            println!("{}", crate::ir::Displayable(&body[..]));
+
+            let cfg = CFG::from_linear(body, vec![], 3);
+            let mut ssa = cfg.to_ssa();
+            let (leaders, antic_in, mut table) = build_sets(&mut ssa);
+            assert_eq!(leaders.len(), 2);
+            assert_eq!(antic_in.len(), 2);
+            let value_3 = table.maybe_insert(Expression::Immediate(3));
+            let value_5 = table.maybe_insert(Expression::Immediate(5));
+            let value_slt = table.maybe_insert(Expression::Reg(6));
+            let value_sub = table.maybe_insert(Expression::Sub(value_slt, value_5));
+            let value_xor = table.maybe_insert(Expression::Xor(value_sub, value_slt));
+            assert_eq!(leaders[0].len(), 2);
+            assert_eq!(*leaders[0].get(&value_3).unwrap(), 4);
+            assert_eq!(*leaders[0].get(&value_5).unwrap(), 5);
+            assert_eq!(leaders[1].len(), 4);
+            assert_eq!(*leaders[1].get(&value_3).unwrap(), 4);
+            assert_eq!(*leaders[1].get(&value_5).unwrap(), 5);
+            assert_eq!(*leaders[1].get(&value_sub).unwrap(), 7);
+            assert_eq!(*leaders[1].get(&value_xor).unwrap(), 8);
+
+            assert_eq!(
+                Vec::from_iter(antic_in[0].iter().cloned()),
+                &[
+                    (value_3, Expression::Immediate(3)),
+                    (value_5, Expression::Immediate(5)),
+                ]
+            );
+            assert_eq!(
+                Vec::from_iter(antic_in[1].iter().cloned()),
+                &[
+                    (value_slt, Expression::Reg(6)),
+                    (value_5, Expression::Reg(5)),
+                    (value_sub, Expression::Sub(value_slt, value_5)),
+                    (value_xor, Expression::Xor(value_slt, value_sub)),
+                ]
+            );
+        }
+
+        #[test]
+        fn build_sets_if() {
+            let l1: Rc<str> = "Label1".into();
+            let l2: Rc<str> = "Label2".into();
+            let body = vec![
+                Operator::Li(1, 3),
+                Operator::Li(2, 5),
+                Operator::Add(3, 1, 2),
+                Operator::Beq(1, 2, Rc::clone(&l1), Rc::clone(&l2)),
+                Operator::Label(Rc::clone(&l1)),
+                Operator::Sub(4, 3, 2),
+                Operator::Xor(5, 4, 3),
+                Operator::Return(5),
+                Operator::Label(Rc::clone(&l2)),
+                Operator::Sub(4, 3, 2),
+                Operator::And(5, 4, 3),
+                Operator::Return(5),
+            ];
+            println!("{}", crate::ir::Displayable(&body[..]));
+
+            let cfg = CFG::from_linear(body, vec![], 5);
+            let mut ssa = cfg.to_ssa();
+            let (leaders, antic_in, mut table) = build_sets(&mut ssa);
+            assert_eq!(leaders.len(), 3);
+            assert_eq!(antic_in.len(), 3);
+            let value_3 = table.maybe_insert(Expression::Immediate(3));
+            let value_5 = table.maybe_insert(Expression::Immediate(5));
+            let value_sum = table.maybe_insert(Expression::Plus(value_3, value_5));
+            let value_sub = table.maybe_insert(Expression::Sub(value_sum, value_5));
+            let value_xor = table.maybe_insert(Expression::Xor(value_sub, value_sum));
+            let value_and = table.maybe_insert(Expression::And(value_sub, value_sum));
+            assert_eq!(leaders[0].len(), 3);
+            assert_eq!(*leaders[0].get(&value_3).unwrap(), 6);
+            assert_eq!(*leaders[0].get(&value_5).unwrap(), 7);
+            assert_eq!(*leaders[0].get(&value_sum).unwrap(), 8);
+            assert_eq!(leaders[1].len(), 5);
+            assert_eq!(*leaders[1].get(&value_3).unwrap(), 6);
+            assert_eq!(*leaders[1].get(&value_5).unwrap(), 7);
+            assert_eq!(*leaders[1].get(&value_sum).unwrap(), 8);
+            assert_eq!(*leaders[1].get(&value_sub).unwrap(), 9);
+            assert_eq!(*leaders[1].get(&value_xor).unwrap(), 10);
+            assert_eq!(leaders[2].len(), 5);
+            assert_eq!(*leaders[2].get(&value_3).unwrap(), 6);
+            assert_eq!(*leaders[2].get(&value_5).unwrap(), 7);
+            assert_eq!(*leaders[2].get(&value_sum).unwrap(), 8);
+            assert_eq!(*leaders[2].get(&value_sub).unwrap(), 11);
+            assert_eq!(*leaders[2].get(&value_and).unwrap(), 12);
+
+            assert_eq!(
+                Vec::from_iter(antic_in[0].iter().cloned()),
+                &[
+                    (value_3, Expression::Immediate(3)),
+                    (value_5, Expression::Immediate(5)),
+                    (value_sum, Expression::Plus(value_3, value_5)),
+                    (value_sub, Expression::Sub(value_sum, value_5)),
+                ]
+            );
+            assert_eq!(
+                Vec::from_iter(antic_in[1].iter().cloned()),
+                &[
+                    (value_sum, Expression::Reg(8)),
+                    (value_5, Expression::Reg(7)),
+                    (value_sub, Expression::Sub(value_sum, value_5)),
+                    (value_xor, Expression::Xor(value_sum, value_sub)),
+                ]
+            );
+            assert_eq!(
+                Vec::from_iter(antic_in[2].iter().cloned()),
+                &[
+                    (value_sum, Expression::Reg(8)),
+                    (value_5, Expression::Reg(7)),
+                    (value_sub, Expression::Sub(value_sum, value_5)),
+                    (value_and, Expression::And(value_sum, value_sub)),
+                ]
+            );
+        }
+        #[test]
+        fn build_sets_loop() {
+            let l1: Rc<str> = "Label1".into();
+            let l2: Rc<str> = "Label2".into();
+            let l3: Rc<str> = "Label3".into();
+            let l4: Rc<str> = "Label4".into();
+            let body = vec![
+                Operator::Li(1, 3),
+                Operator::Li(2, 5),
+                Operator::Add(3, 1, 2),
+                Operator::J(Rc::clone(&l4)),
+                Operator::Label(Rc::clone(&l4)),
+                Operator::Beq(1, 2, Rc::clone(&l1), Rc::clone(&l2)),
+                Operator::Label(Rc::clone(&l1)),
+                Operator::Sub(4, 3, 2),
+                Operator::Xor(5, 4, 3),
+                Operator::J(Rc::clone(&l3)),
+                Operator::Label(Rc::clone(&l2)),
+                Operator::Sub(4, 3, 2),
+                Operator::And(5, 4, 3),
+                Operator::J(Rc::clone(&l3)),
+                Operator::Label(Rc::clone(&l3)),
+                Operator::J(Rc::clone(&l4)),
+            ];
+            println!("{}", crate::ir::Displayable(&body[..]));
+
+            let cfg = CFG::from_linear(body, vec![], 5);
+            let mut ssa = cfg.to_ssa();
+            let (leaders, antic_in, mut table) = build_sets(&mut ssa);
+            assert_eq!(leaders.len(), 5);
+            assert_eq!(antic_in.len(), 5);
+            let value_3 = table.maybe_insert(Expression::Immediate(3));
+            let value_5 = table.maybe_insert(Expression::Immediate(5));
+            let value_sum = table.maybe_insert(Expression::Plus(value_3, value_5));
+            let value_sub = table.maybe_insert(Expression::Sub(value_sum, value_5));
+            let value_xor = table.maybe_insert(Expression::Xor(value_sub, value_sum));
+            let value_and = table.maybe_insert(Expression::And(value_sub, value_sum));
+            assert_eq!(leaders[0].len(), 3);
+            assert_eq!(*leaders[0].get(&value_3).unwrap(), 6);
+            assert_eq!(*leaders[0].get(&value_5).unwrap(), 7);
+            assert_eq!(*leaders[0].get(&value_sum).unwrap(), 8);
+            assert_eq!(leaders[1].len(), 3);
+            assert_eq!(leaders[2].len(), 5);
+            assert_eq!(*leaders[2].get(&value_3).unwrap(), 6);
+            assert_eq!(*leaders[2].get(&value_5).unwrap(), 7);
+            assert_eq!(*leaders[2].get(&value_sum).unwrap(), 8);
+            assert_eq!(*leaders[2].get(&value_sub).unwrap(), 9);
+            assert_eq!(*leaders[2].get(&value_xor).unwrap(), 10);
+            assert_eq!(leaders[3].len(), 5);
+            assert_eq!(*leaders[3].get(&value_3).unwrap(), 6);
+            assert_eq!(*leaders[3].get(&value_5).unwrap(), 7);
+            assert_eq!(*leaders[3].get(&value_sum).unwrap(), 8);
+            assert_eq!(*leaders[3].get(&value_sub).unwrap(), 11);
+            assert_eq!(*leaders[3].get(&value_and).unwrap(), 12);
+
+            assert_eq!(
+                Vec::from_iter(antic_in[0].iter().cloned()),
+                &[
+                    (value_3, Expression::Immediate(3)),
+                    (value_5, Expression::Immediate(5)),
+                    (value_sum, Expression::Plus(value_3, value_5)),
+                    (value_sub, Expression::Sub(value_sum, value_5)),
+                ]
+            );
+            assert_eq!(
+                Vec::from_iter(antic_in[1].iter().cloned()),
+                &[
+                    (value_sum, Expression::Reg(8)),
+                    (value_5, Expression::Reg(7)),
+                    (value_sub, Expression::Sub(value_sum, value_5)),
+                ]
+            );
+            assert_eq!(
+                Vec::from_iter(antic_in[2].iter().cloned()),
+                &[
+                    (value_sum, Expression::Reg(8)),
+                    (value_5, Expression::Reg(7)),
+                    (value_sub, Expression::Sub(value_sum, value_5)),
+                    (value_xor, Expression::Xor(value_sum, value_sub)),
+                ]
+            );
+            assert_eq!(
+                Vec::from_iter(antic_in[3].iter().cloned()),
+                &[
+                    (value_sum, Expression::Reg(8)),
+                    (value_5, Expression::Reg(7)),
+                    (value_sub, Expression::Sub(value_sum, value_5)),
+                    (value_and, Expression::And(value_sum, value_sub)),
+                ]
+            );
+            assert_eq!(
+                Vec::from_iter(antic_in[4].iter().cloned()),
+                &[
+                    (value_sum, Expression::Reg(8)),
+                    (value_5, Expression::Reg(7)),
+                    (value_sub, Expression::Sub(value_sum, value_5)),
+                ]
+            );
+        }
+        #[test]
+        fn build_sets_phi() {
+            let l1: Rc<str> = "Label1".into();
+            let l2: Rc<str> = "Label2".into();
+            let l3: Rc<str> = "Label3".into();
+            let l4: Rc<str> = "Label4".into();
+            let body = vec![
+                Operator::Li(1, 3),
+                Operator::Li(2, 5),
+                Operator::Add(3, 1, 2),
+                Operator::J(Rc::clone(&l4)),
+                Operator::Label(Rc::clone(&l4)),
+                Operator::Beq(1, 2, Rc::clone(&l1), Rc::clone(&l2)),
+                Operator::Label(Rc::clone(&l1)),
+                Operator::Sub(4, 3, 2),
+                Operator::Xor(3, 4, 3),
+                Operator::J(Rc::clone(&l3)),
+                Operator::Label(Rc::clone(&l2)),
+                Operator::Sub(4, 3, 2),
+                Operator::And(3, 4, 3),
+                Operator::J(Rc::clone(&l3)),
+                Operator::Label(Rc::clone(&l3)),
+                Operator::J(Rc::clone(&l4)),
+            ];
+            println!("{}", crate::ir::Displayable(&body[..]));
+
+            let cfg = CFG::from_linear(body, vec![], 5);
+            let mut ssa = cfg.to_ssa();
+            let (leaders, antic_in, mut table) = build_sets(&mut ssa);
+            assert_eq!(leaders.len(), 5);
+            assert_eq!(antic_in.len(), 5);
+            let value_3 = table.maybe_insert(Expression::Immediate(3));
+            let value_5 = table.maybe_insert(Expression::Immediate(5));
+            let value_phi1 = table.maybe_insert(Expression::Phi(vec![8, 14]));
+            let value_phi2 = table.maybe_insert(Expression::Phi(vec![11, 13]));
+            let value_sum = table.maybe_insert(Expression::Plus(value_3, value_5));
+            let value_sub = table.maybe_insert(Expression::Sub(value_sum, value_5));
+            let value_sub_phi = table.maybe_insert(Expression::Sub(value_phi1, value_5));
+            let value_xor = table.maybe_insert(Expression::Xor(value_sub_phi, value_phi1));
+            let value_and = table.maybe_insert(Expression::And(value_sub_phi, value_phi1));
+            assert_eq!(leaders[0].len(), 3);
+            assert_eq!(*leaders[0].get(&value_3).unwrap(), 6);
+            assert_eq!(*leaders[0].get(&value_5).unwrap(), 7);
+            assert_eq!(*leaders[0].get(&value_sum).unwrap(), 8);
+            assert_eq!(leaders[1].len(), 4);
+            assert_eq!(leaders[2].len(), 6);
+            assert_eq!(*leaders[2].get(&value_3).unwrap(), 6);
+            assert_eq!(*leaders[2].get(&value_5).unwrap(), 7);
+            assert_eq!(*leaders[2].get(&value_sum).unwrap(), 8);
+            assert_eq!(*leaders[2].get(&value_sub_phi).unwrap(), 10);
+            assert_eq!(*leaders[2].get(&value_xor).unwrap(), 11);
+            assert_eq!(leaders[3].len(), 6);
+            assert_eq!(*leaders[3].get(&value_3).unwrap(), 6);
+            assert_eq!(*leaders[3].get(&value_5).unwrap(), 7);
+            assert_eq!(*leaders[3].get(&value_sum).unwrap(), 8);
+            assert_eq!(*leaders[3].get(&value_sub_phi).unwrap(), 12);
+            assert_eq!(*leaders[3].get(&value_and).unwrap(), 13);
+            assert_eq!(leaders[4].len(), 5);
+            assert_eq!(*leaders[3].get(&value_3).unwrap(), 6);
+            assert_eq!(*leaders[3].get(&value_5).unwrap(), 7);
+            assert_eq!(*leaders[3].get(&value_sum).unwrap(), 8);
+            assert_eq!(*leaders[3].get(&value_sub_phi).unwrap(), 12);
+
+            assert_eq!(
+                Vec::from_iter(antic_in[0].iter().cloned()),
+                &[
+                    (value_3, Expression::Immediate(3)),
+                    (value_5, Expression::Immediate(5)),
+                    (value_sum, Expression::Plus(value_3, value_5)),
+                    (value_sub, Expression::Sub(value_sum, value_5)),
+                ]
+            );
+            assert_eq!(
+                Vec::from_iter(antic_in[1].iter().cloned()),
+                &[
+                    (value_phi1, Expression::Reg(9)),
+                    (value_5, Expression::Reg(7)),
+                    (value_sub_phi, Expression::Sub(value_phi1, value_5)),
+                ]
+            );
+            assert_eq!(
+                Vec::from_iter(antic_in[2].iter().cloned()),
+                &[
+                    (value_phi1, Expression::Reg(9)),
+                    (value_5, Expression::Reg(7)),
+                    (value_sub_phi, Expression::Sub(value_phi1, value_5)),
+                    (value_xor, Expression::Xor(value_phi1, value_sub_phi)),
+                    (
+                        table.maybe_insert(Expression::Sub(value_xor, value_5)),
+                        Expression::Sub(value_xor, value_5)
+                    ),
+                ]
+            );
+            assert_eq!(
+                Vec::from_iter(antic_in[3].iter().cloned()),
+                &[
+                    (value_phi1, Expression::Reg(9)),
+                    (value_5, Expression::Reg(7)),
+                    (value_sub_phi, Expression::Sub(value_phi1, value_5)),
+                    (value_and, Expression::And(value_phi1, value_sub_phi)),
+                    (
+                        table.maybe_insert(Expression::Sub(value_and, value_5)),
+                        Expression::Sub(value_and, value_5)
+                    ),
+                ]
+            );
+            assert_eq!(
+                Vec::from_iter(antic_in[4].iter().cloned()),
+                &[
+                    (value_phi2, Expression::Reg(14)),
+                    (value_5, Expression::Reg(7)),
+                    (
+                        table.maybe_insert(Expression::Sub(value_phi2, value_5)),
+                        Expression::Sub(value_phi2, value_5)
+                    ),
+                ]
+            );
         }
     }
 }
