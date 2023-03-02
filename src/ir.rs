@@ -583,6 +583,9 @@ impl<O> CFG<O> {
     pub fn get_block(&self, i: usize) -> &Block<O> {
         self.blocks.get(i).unwrap()
     }
+    pub fn is_empty(&self) -> bool {
+        self.blocks.is_empty()
+    }
     pub fn len(&self) -> usize {
         self.blocks.len()
     }
