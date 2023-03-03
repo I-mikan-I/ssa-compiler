@@ -7,13 +7,14 @@ The compiler will host an optimization pipeline and native machine code generati
 ## Roadmap
 
 - [x] Parser (DONE)
-- [ ] Intermediate Representation
+- [x] Intermediate Representation (DONE)
     - [x] Definition (DONE)
     - [x] Translation from AST (DONE)
     - [x] CFG construction (DONE)
     - [x] SSA transformation (DONE)
 - [ ] Optimization passes (WIP)
-    - [ ] GVN-PRE (WIP)
+    - [x] GVN-PRE (DONE)
+    - [ ] Copy Propagation (WIP)
 - [ ] Backend
 
 ## Cargo features

@@ -2,7 +2,7 @@ pub mod gvn_pre {
     #![allow(clippy::too_many_arguments)]
     use std::collections::{HashMap, HashSet, LinkedList};
 
-    use crate::ir::{Operator, SSAOperator, VReg, CFG};
+    use crate::ir::{Block, Operator, SSAOperator, VReg, VRegGenerator, CFG};
 
     pub fn optimize(cfg: &mut CFG<SSAOperator>) {
         todo!()
@@ -57,6 +57,29 @@ pub mod gvn_pre {
                 _ => vec![],
             }
         }
+        fn is_simple(&self) -> bool {
+            matches!(self, Expression::Reg(_))
+        }
+        fn to_instruction(&self, leaders: &HashMap<Value, VReg>, rec: VReg) -> SSAOperator {
+            macro_rules! generate_instr {
+                ($t:path, $($x:expr),+) => {
+                    SSAOperator::IROp($t(rec, $(*leaders.get($x).unwrap()),+))
+                };
+            }
+            match self {
+                Expression::Plus(x, y) => generate_instr!(Operator::Add, x, y),
+                Expression::Sub(x, y) => generate_instr!(Operator::Sub, x, y),
+                Expression::Mult(x, y) => generate_instr!(Operator::Mult, x, y),
+                Expression::Div(x, y) => generate_instr!(Operator::Div, x, y),
+                Expression::And(x, y) => generate_instr!(Operator::And, x, y),
+                Expression::Or(x, y) => generate_instr!(Operator::Or, x, y),
+                Expression::Xor(x, y) => generate_instr!(Operator::Xor, x, y),
+                Expression::Mv(x) => generate_instr!(Operator::Mv, x),
+                Expression::Immediate(i) => SSAOperator::IROp(Operator::Li(rec, *i)),
+                Expression::Reg(_) => panic!("No instruction for reg value representation"),
+                Expression::Phi(_) => panic!("No instruction for phi value representation"),
+            }
+        }
     }
     struct ValueTable {
         expressions: HashMap<Expression, Value>,
@@ -81,7 +104,8 @@ pub mod gvn_pre {
         fn insert_with(&mut self, exp: Expression, val: Value) {
             let canon = exp.canon();
             let res = self.expressions.insert(canon, val);
-            debug_assert!(res.is_none() || res.unwrap() == val);
+            let assertion = res.is_none() || res.unwrap() == val;
+            debug_assert!(assertion);
         }
         fn maybe_insert_op(
             &mut self,
@@ -201,16 +225,17 @@ pub mod gvn_pre {
         }
     }
 
-    type Leader = VReg; //placeholder
-    type AntiLeader = bool;
+    type LeaderSet = Vec<HashMap<Value, VReg>>;
+    type AntileaderSet = Vec<LinkedList<(Value, Expression)>>;
+    type PhiGen = Vec<HashMap<Value, VReg>>;
 
     fn build_sets_phase1(
         cfg: &CFG<SSAOperator>,
         current: usize,
         exp_gen: &mut Vec<LinkedList<(Value, Expression)>>,
-        phi_gen: &mut Vec<HashMap<Value, VReg>>,
+        phi_gen: &mut PhiGen,
         tmp_gen: &mut Vec<HashSet<VReg>>,
-        leaders: &mut Vec<HashMap<Value, VReg>>,
+        leaders: &mut LeaderSet,
         table: &mut ValueTable,
     ) {
         let block = cfg.get_block(current);
@@ -233,6 +258,58 @@ pub mod gvn_pre {
             leaders[dom_child] = leaders[current].clone();
             build_sets_phase1(cfg, dom_child, exp_gen, phi_gen, tmp_gen, leaders, table);
         }
+    }
+
+    fn phi_translate(
+        phi_gen: &HashMap<Value, VReg>,
+        antic_in_succ: &LinkedList<(Value, Expression)>,
+        child: &Block<SSAOperator>,
+        current: usize,
+        value_table: &mut ValueTable,
+    ) -> LinkedList<(Value, Expression)> {
+        let mut result = LinkedList::new();
+        let mut translated = HashMap::new();
+        for (val, exp) in antic_in_succ {
+            if let Some(&reg) = phi_gen.get(val) {
+                let child_block = child;
+                let self_index = child_block
+                    .preds
+                    .iter()
+                    .position(|&blk| blk == current)
+                    .unwrap();
+                let mut iter = child_block.body.iter();
+                while let Some(SSAOperator::Phi(rec, vec)) = iter.next() {
+                    if *rec == reg {
+                        let translated_reg = vec[self_index];
+                        let translated_val =
+                            value_table.maybe_insert(Expression::Reg(translated_reg));
+                        result.push_back((translated_val, Expression::Reg(translated_reg)));
+                        translated.insert(*val, translated_val);
+                    }
+                }
+            } else {
+                macro_rules! maybe_translate {
+                        ($t:path, $($x:expr),+) => {
+                            $t($(if let Some(new) = translated.get($x) {*new} else {*$x}),+)
+                        }
+                    }
+                let updated = match exp {
+                    Expression::Plus(x, y) => maybe_translate!(Expression::Plus, x, y),
+                    Expression::Sub(x, y) => maybe_translate!(Expression::Sub, x, y),
+                    Expression::Mult(x, y) => maybe_translate!(Expression::Mult, x, y),
+                    Expression::Div(x, y) => maybe_translate!(Expression::Div, x, y),
+                    Expression::And(x, y) => maybe_translate!(Expression::And, x, y),
+                    Expression::Or(x, y) => maybe_translate!(Expression::Or, x, y),
+                    Expression::Xor(x, y) => maybe_translate!(Expression::Xor, x, y),
+                    Expression::Phi(..) => continue,
+                    e => e.clone(),
+                };
+                let updated_val = value_table.maybe_insert(updated.clone());
+                result.push_back((updated_val, updated));
+                translated.insert(*val, updated_val);
+            }
+        }
+        result
     }
 
     fn build_sets_phase2(
@@ -279,50 +356,15 @@ pub mod gvn_pre {
             }
             antic_out[current] = result;
         } else if block.children.len() == 1 {
-            let mut result = LinkedList::new();
-            let mut translated = HashMap::new();
             let child = block.children[0];
             let antic_in_succ = &antic_in[child];
-            for (val, exp) in antic_in_succ {
-                if let Some(&reg) = phi_gen[child].get(val) {
-                    let child_block = cfg.get_block(child);
-                    let self_index = child_block
-                        .preds
-                        .iter()
-                        .position(|&blk| blk == current)
-                        .unwrap();
-                    let mut iter = child_block.body.iter();
-                    while let Some(SSAOperator::Phi(rec, vec)) = iter.next() {
-                        if *rec == reg {
-                            let translated_reg = vec[self_index];
-                            let translated_val =
-                                value_table.maybe_insert(Expression::Reg(translated_reg));
-                            result.push_back((translated_val, Expression::Reg(translated_reg)));
-                            translated.insert(*val, translated_val);
-                        }
-                    }
-                } else {
-                    macro_rules! maybe_translate {
-                        ($t:path, $($x:expr),+) => {
-                            $t($(if let Some(new) = translated.get($x) {*new} else {*$x}),+)
-                        }
-                    }
-                    let updated = match exp {
-                        Expression::Plus(x, y) => maybe_translate!(Expression::Plus, x, y),
-                        Expression::Sub(x, y) => maybe_translate!(Expression::Sub, x, y),
-                        Expression::Mult(x, y) => maybe_translate!(Expression::Mult, x, y),
-                        Expression::Div(x, y) => maybe_translate!(Expression::Div, x, y),
-                        Expression::And(x, y) => maybe_translate!(Expression::And, x, y),
-                        Expression::Or(x, y) => maybe_translate!(Expression::Or, x, y),
-                        Expression::Xor(x, y) => maybe_translate!(Expression::Xor, x, y),
-                        Expression::Phi(..) => continue,
-                        e => e.clone(),
-                    };
-                    let updated_val = value_table.maybe_insert(updated.clone());
-                    result.push_back((updated_val, updated));
-                    translated.insert(*val, updated_val);
-                }
-            }
+            let result = phi_translate(
+                &phi_gen[child],
+                antic_in_succ,
+                cfg.get_block(child),
+                current,
+                value_table,
+            );
             if antic_out[current] != result {
                 *changed = true;
             }
@@ -376,7 +418,8 @@ pub mod gvn_pre {
         while let Some(next) = rpo.pop() {
             let block = cfg.get_block(next);
             for op in &block.body {
-                let _ = value_table.maybe_insert_op(op, &mut LinkedList::new(), &mut HashSet::new());
+                let _ =
+                    value_table.maybe_insert_op(op, &mut LinkedList::new(), &mut HashSet::new());
             }
         }
 
@@ -394,13 +437,7 @@ pub mod gvn_pre {
         value_table
     }
 
-    fn build_sets(
-        cfg: &mut CFG<SSAOperator>,
-    ) -> (
-        Vec<HashMap<Value, VReg>>,
-        Vec<LinkedList<(Value, Expression)>>,
-        ValueTable,
-    ) {
+    fn build_sets(cfg: &mut CFG<SSAOperator>) -> (LeaderSet, AntileaderSet, PhiGen, ValueTable) {
         let mut value_table = generate_value_table(cfg);
 
         let mut exp_gen = vec![LinkedList::default(); cfg.len()];
@@ -444,7 +481,203 @@ pub mod gvn_pre {
         {
             println! {"antic_in: \n{:?}\n", antic_in};
         }
-        (leaders, antic_in, value_table)
+        (leaders, antic_in, phi_gen, value_table)
+    }
+
+    fn insert(
+        cfg: &mut CFG<SSAOperator>,
+        leaders: &mut LeaderSet,
+        antileaders: &AntileaderSet,
+        phi_gen: &PhiGen,
+        value_table: &mut ValueTable,
+    ) {
+        fn insert_recurse(
+            cfg: &mut CFG<SSAOperator>,
+            current: usize,
+            leaders: &mut LeaderSet,
+            antileaders: &AntileaderSet,
+            phi_gen: &PhiGen,
+            value_table: &mut ValueTable,
+            changed: &mut bool,
+            gen: &mut VRegGenerator,
+            new_exprs: &mut Vec<HashSet<Value>>,
+        ) {
+            let block = cfg.get_block(current);
+            if block.preds.len() > 1 {
+                let antic = &antileaders[current];
+                let translated_preds = block
+                    .preds
+                    .iter()
+                    .map(|&pred| {
+                        (
+                            pred,
+                            phi_translate(&phi_gen[current], antic, block, pred, value_table),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let to_hoist = translated_preds
+                    .iter()
+                    .flat_map(|(pred, expr)| {
+                        expr.iter().zip(antic).enumerate().filter_map(
+                            |(i, ((val, exp), (val_orig, _)))| {
+                                if leaders[*pred].contains_key(val)
+                                    && !exp.is_simple()
+                                    && !new_exprs[current].contains(val_orig)
+                                // exclude on 2nd run
+                                {
+                                    Some(i)
+                                } else {
+                                    None
+                                }
+                            },
+                        )
+                    })
+                    .collect::<HashSet<_>>();
+                let mut new_phis = vec![Vec::default(); to_hoist.len()];
+                for (pred, exprs) in translated_preds.into_iter() {
+                    let mut i = 0;
+                    for (k, (val, exp)) in exprs.into_iter().enumerate() {
+                        if !to_hoist.contains(&k) {
+                            continue;
+                        }
+                        let leaders = &mut leaders[pred];
+                        if !leaders.contains_key(&val) {
+                            let new_reg = gen.next_reg();
+                            let new_op = exp.to_instruction(leaders, new_reg);
+                            let branch = cfg.get_block_mut(pred).body.pop();
+                            cfg.get_block_mut(pred).body.push(new_op);
+                            branch.and_then(|branch| {
+                                cfg.get_block_mut(pred).body.push(branch);
+                                Option::<()>::None
+                            });
+                            leaders.insert(val, new_reg);
+                            new_exprs[pred].insert(val);
+                            *changed = true;
+                        }
+                        new_phis[i].push(*leaders.get(&val).unwrap());
+                        i += 1;
+                    }
+                }
+                debug_assert!(to_hoist.len() == new_phis.len());
+                let mut new_body: Vec<SSAOperator> = new_phis
+                    .into_iter()
+                    .map(|vec| SSAOperator::Phi(gen.next_reg(), vec))
+                    .collect();
+                let mut phi_ptr = 0;
+                for (i, (val, _)) in antic.iter().enumerate() {
+                    if !to_hoist.contains(&i) {
+                        continue;
+                    }
+                    if let SSAOperator::Phi(rec, v) = &new_body[phi_ptr] {
+                        value_table.insert_with(Expression::Phi(v.clone()), *val);
+                        value_table.insert_with(Expression::Reg(*rec), *val);
+                        leaders[current].insert(*val, *rec);
+                        new_exprs[current].insert(*val);
+                    } else {
+                        unreachable!("has to have phi form")
+                    }
+                    phi_ptr += 1;
+                }
+                let block = cfg.get_block_mut(current);
+                let mut old_body = std::mem::take(&mut block.body);
+                new_body.append(&mut old_body);
+                block.body = new_body;
+            }
+            for idom_child in cfg.get_block(current).idom_of.clone() {
+                let add_exprs = new_exprs[current].clone();
+                for val in add_exprs.iter() {
+                    let leader = *leaders[current].get(val).unwrap();
+                    leaders[idom_child].insert(*val, leader);
+                }
+                new_exprs[idom_child].extend(add_exprs);
+                insert_recurse(
+                    cfg,
+                    idom_child,
+                    leaders,
+                    antileaders,
+                    phi_gen,
+                    value_table,
+                    changed,
+                    gen,
+                    new_exprs,
+                );
+            }
+        }
+        let mut changed = true;
+        let mut gen = VRegGenerator::starting_at_reg(cfg.get_max_reg());
+        let mut new_exprs = vec![HashSet::default(); cfg.len()];
+        while changed {
+            changed = false;
+            insert_recurse(
+                cfg,
+                cfg.get_entry(),
+                leaders,
+                antileaders,
+                phi_gen,
+                value_table,
+                &mut changed,
+                &mut gen,
+                &mut new_exprs,
+            );
+        }
+        #[cfg(feature = "print-gvn")]
+        {
+            println! {"leaders post insert: \n{:?}\n", leaders};
+        }
+    }
+
+    fn eliminate(cfg: &mut CFG<SSAOperator>, leaders: &LeaderSet, value_table: &mut ValueTable) {
+        for (i, block) in cfg.get_blocks_mut().iter_mut().enumerate() {
+            let mut body_old = vec![];
+            std::mem::swap(&mut body_old, &mut block.body);
+            block.body = body_old
+                .into_iter()
+                .filter_map(|op| {
+                    macro_rules! swap_op {
+                        ($reg:expr, $op:expr) => {{
+                            if let Some(&leader) =
+                                leaders[i].get(&value_table.maybe_insert(Expression::Reg($reg)))
+                            {
+                                if leader != $reg {
+                                    return Some(SSAOperator::IROp(Operator::Mv($reg, leader)));
+                                }
+                            }
+                            Some(SSAOperator::IROp($op))
+                        }};
+                    }
+                    match op {
+                        SSAOperator::IROp(op) => match op {
+                            Operator::Add(x, ..)
+                            | Operator::Sub(x, _, _)
+                            | Operator::Mult(x, _, _)
+                            | Operator::Div(x, _, _)
+                            | Operator::And(x, _, _)
+                            | Operator::Or(x, _, _)
+                            | Operator::Mv(x, _)
+                            | Operator::Xor(x, _, _)
+                            | Operator::Load(x, _, _)
+                            | Operator::Store(x, _, _)
+                            | Operator::La(x, _)
+                            | Operator::Li(x, _)
+                            | Operator::Slt(x, _, _)
+                            | Operator::Call(x, _, _)
+                            | Operator::GetParameter(x, _) => swap_op!(x, op),
+                            o => Some(SSAOperator::IROp(o)),
+                        },
+                        SSAOperator::Phi(x, _) => {
+                            if let Some(&leader) =
+                                leaders[i].get(&value_table.maybe_insert(Expression::Reg(x)))
+                            {
+                                if leader != x {
+                                    return None;
+                                }
+                            }
+                            Some(op)
+                        }
+                    }
+                })
+                .collect();
+        }
     }
 
     #[cfg(test)]
@@ -519,7 +752,7 @@ pub mod gvn_pre {
 
             let cfg = CFG::from_linear(body, vec![], 3);
             let mut ssa = cfg.to_ssa();
-            let (leaders, antic_in, mut table) = build_sets(&mut ssa);
+            let (leaders, antic_in, _, mut table) = build_sets(&mut ssa);
             assert_eq!(leaders.len(), 1);
             let value_3 = table.maybe_insert(Expression::Immediate(3));
             let value_5 = table.maybe_insert(Expression::Immediate(5));
@@ -555,7 +788,7 @@ pub mod gvn_pre {
 
             let cfg = CFG::from_linear(body, vec![], 3);
             let mut ssa = cfg.to_ssa();
-            let (leaders, antic_in, mut table) = build_sets(&mut ssa);
+            let (leaders, antic_in, _, mut table) = build_sets(&mut ssa);
             assert_eq!(leaders.len(), 2);
             assert_eq!(antic_in.len(), 2);
             let value_3 = table.maybe_insert(Expression::Immediate(3));
@@ -612,7 +845,7 @@ pub mod gvn_pre {
 
             let cfg = CFG::from_linear(body, vec![], 3);
             let mut ssa = cfg.to_ssa();
-            let (leaders, antic_in, mut table) = build_sets(&mut ssa);
+            let (leaders, antic_in, _, mut table) = build_sets(&mut ssa);
             assert_eq!(leaders.len(), 2);
             assert_eq!(antic_in.len(), 2);
             let value_3 = table.maybe_insert(Expression::Immediate(3));
@@ -669,7 +902,7 @@ pub mod gvn_pre {
 
             let cfg = CFG::from_linear(body, vec![], 5);
             let mut ssa = cfg.to_ssa();
-            let (leaders, antic_in, mut table) = build_sets(&mut ssa);
+            let (leaders, antic_in, _, mut table) = build_sets(&mut ssa);
             assert_eq!(leaders.len(), 3);
             assert_eq!(antic_in.len(), 3);
             let value_3 = table.maybe_insert(Expression::Immediate(3));
@@ -751,7 +984,7 @@ pub mod gvn_pre {
 
             let cfg = CFG::from_linear(body, vec![], 5);
             let mut ssa = cfg.to_ssa();
-            let (leaders, antic_in, mut table) = build_sets(&mut ssa);
+            let (leaders, antic_in, _, mut table) = build_sets(&mut ssa);
             assert_eq!(leaders.len(), 5);
             assert_eq!(antic_in.len(), 5);
             let value_3 = table.maybe_insert(Expression::Immediate(3));
@@ -850,7 +1083,7 @@ pub mod gvn_pre {
 
             let cfg = CFG::from_linear(body, vec![], 5);
             let mut ssa = cfg.to_ssa();
-            let (leaders, antic_in, mut table) = build_sets(&mut ssa);
+            let (leaders, antic_in, _, mut table) = build_sets(&mut ssa);
             assert_eq!(leaders.len(), 5);
             assert_eq!(antic_in.len(), 5);
             let value_3 = table.maybe_insert(Expression::Immediate(3));
@@ -939,6 +1172,44 @@ pub mod gvn_pre {
                     ),
                 ]
             );
+        }
+
+        #[test]
+        fn insert_phi() {
+            let l1: Rc<str> = "Label1".into();
+            let l2: Rc<str> = "Label2".into();
+            let l3: Rc<str> = "Label3".into();
+            let l4: Rc<str> = "Label4".into();
+            let body = vec![
+                Operator::Li(1, 3),
+                Operator::J(Rc::clone(&l4)),
+                Operator::Label(Rc::clone(&l4)),
+                Operator::Li(2, 5),
+                Operator::Add(3, 1, 2),
+                Operator::Beq(1, 2, Rc::clone(&l1), Rc::clone(&l2)),
+                Operator::Label(Rc::clone(&l1)),
+                Operator::Sub(4, 3, 2),
+                Operator::Xor(3, 4, 3),
+                Operator::J(Rc::clone(&l3)),
+                Operator::Label(Rc::clone(&l2)),
+                Operator::Sub(4, 3, 2),
+                Operator::And(3, 4, 3),
+                Operator::Sub(7, 3, 1),
+                Operator::J(Rc::clone(&l3)),
+                Operator::Label(Rc::clone(&l3)),
+                Operator::Sub(6, 3, 1),
+                Operator::J(Rc::clone(&l4)),
+            ];
+            println!("{}", crate::ir::Displayable(&body[..]));
+
+            let cfg = CFG::from_linear(body, vec![], 8);
+            let mut ssa = cfg.to_ssa();
+            let (mut leaders, antic_in, phi_gen, mut table) = build_sets(&mut ssa);
+            println!("Before insert: \n {}", ssa.to_dot());
+            insert(&mut ssa, &mut leaders, &antic_in, &phi_gen, &mut table);
+            println!("After insert: \n {}", ssa.to_dot());
+            eliminate(&mut ssa, &leaders, &mut table);
+            println!("After eliminate: \n {}", ssa.to_dot());
         }
     }
 }

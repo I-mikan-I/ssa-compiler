@@ -92,7 +92,7 @@ use std::{
 use crate::util::SheafTable;
 
 pub type VReg = u32;
-struct VRegGenerator(u32, u32, String);
+pub struct VRegGenerator(u32, u32, String);
 impl VRegGenerator {
     pub fn starting_at_reg(at: u32) -> Self {
         Self(at, 0, "_LABEL_".into())
@@ -112,6 +112,11 @@ impl VRegGenerator {
         let res = format!("{}{}", self.2, self.1);
         self.1 += 1;
         res
+    }
+}
+impl Default for VRegGenerator {
+    fn default() -> Self {
+        Self::new()
     }
 }
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -201,7 +206,11 @@ impl Display for SSAOperator {
             SSAOperator::Phi(rd1, args) => {
                 write!(f, "\trd{rd1} <- \u{03D5} ( ")?;
                 for arg in args {
-                    write!(f, "{arg} ")?;
+                    if *arg == u32::MAX {
+                        write!(f, "\u{22a5} ")?
+                    } else {
+                        write!(f, "{arg} ")?;
+                    }
                 }
                 write!(f, ")")
             }
@@ -577,8 +586,17 @@ pub struct CFG<O> {
     max_reg: VReg,
 }
 impl<O> CFG<O> {
+    pub fn get_blocks(&self) -> &[Block<O>] {
+        &self.blocks
+    }
+    pub fn get_blocks_mut(&mut self) -> &mut [Block<O>] {
+        &mut self.blocks
+    }
     pub fn get_entry(&self) -> usize {
         self.entry
+    }
+    pub fn get_max_reg(&self) -> VReg {
+        self.max_reg
     }
     pub fn get_block(&self, i: usize) -> &Block<O> {
         self.blocks.get(i).unwrap()
@@ -978,7 +996,7 @@ impl CFG<Operator> {
         let result = CFG {
             blocks: new_blocks,
             entry: self.entry,
-            max_reg: self.max_reg,
+            max_reg: generator.next_reg(),
         };
         let _ = result;
         #[cfg(feature = "print-cfgs")]
