@@ -14,7 +14,7 @@ The compiler will host an optimization pipeline and native machine code generati
     - [x] SSA transformation (DONE)
 - [ ] Optimization passes (WIP)
     - [x] GVN-PRE (DONE)
-    - [ ] Copy Propagation (WIP)
+    - [x] Copy Propagation (DONE)
 - [ ] Backend
 
 ## Cargo features
