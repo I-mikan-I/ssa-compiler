@@ -5,7 +5,9 @@ pub mod gvn_pre {
     use crate::ir::{Block, Operator, SSAOperator, VReg, VRegGenerator, CFG};
 
     pub fn optimize(cfg: &mut CFG<SSAOperator>) {
-        todo!()
+        let (mut leaders, antileaders, phigen, mut value_table) = build_sets(cfg);
+        insert(cfg, &mut leaders, &antileaders, &phigen, &mut value_table);
+        eliminate(cfg, &leaders, &mut value_table);
     }
 
     type Value = usize;
@@ -620,6 +622,7 @@ pub mod gvn_pre {
                 &mut new_exprs,
             );
         }
+        cfg.set_max_reg(gen.next_reg());
         #[cfg(feature = "print-gvn")]
         {
             println! {"leaders post insert: \n{:?}\n", leaders};
@@ -1210,6 +1213,309 @@ pub mod gvn_pre {
             println!("After insert: \n {}", ssa.to_dot());
             eliminate(&mut ssa, &leaders, &mut table);
             println!("After eliminate: \n {}", ssa.to_dot());
+        }
+    }
+}
+
+pub mod copy_propagation {
+    #![allow(clippy::too_many_arguments)]
+    use std::collections::HashMap;
+
+    use crate::ir::{SSAOperator, VReg, CFG};
+
+    #[derive(Debug, PartialEq, Eq, Clone, Copy)]
+    enum Lattice {
+        Top,
+        CopyOf(VReg),
+        Bottom,
+    }
+
+    impl Lattice {
+        fn meet(&self, other: &Lattice, regs: VReg, rego: VReg) -> Self {
+            match (self, other) {
+                (Lattice::CopyOf(reg), Lattice::CopyOf(reg2)) => {
+                    if reg == reg2 {
+                        Lattice::CopyOf(*reg)
+                    } else {
+                        Lattice::Bottom
+                    }
+                }
+                (Lattice::Bottom, Lattice::Bottom) => Lattice::Bottom,
+                (Lattice::Bottom, Lattice::CopyOf(reg)) => {
+                    if regs == *reg {
+                        Lattice::CopyOf(regs)
+                    } else {
+                        Lattice::Bottom
+                    }
+                }
+                (Lattice::CopyOf(reg), Lattice::Bottom) => {
+                    if rego == *reg {
+                        Lattice::CopyOf(rego)
+                    } else {
+                        Lattice::Bottom
+                    }
+                }
+                (Lattice::Top, o) | (o, Lattice::Top) => *o,
+            }
+        }
+    }
+
+    fn visit_op<'a, 'b>(
+        op: &SSAOperator,
+        block: usize,
+        cfg: &CFG<SSAOperator>,
+        result: &mut [Lattice],
+        cfg_worklist: &mut Vec<(usize, usize)>,
+        ssa_worklist: &mut Vec<(&'a SSAOperator, usize)>,
+        executable: &mut HashMap<(usize, usize), bool>,
+        ssa_graph: &[Vec<(&'b SSAOperator, usize)>],
+    ) where
+        'b: 'a,
+    {
+        let receiver = op.receiver();
+        let old = receiver.map(|r| result[r as usize]);
+        match op {
+            SSAOperator::IROp(op_) => match op_ {
+                crate::ir::Operator::Bgt(x, y, _, _) | crate::ir::Operator::Bl(x, y, _, _) => {
+                    macro_rules! append_non_executable {
+                        ($reg1:expr, $reg2:expr) => {{
+                            if $reg1 != $reg2
+                                && !*executable
+                                    .entry((block, cfg.get_block(block).children[0]))
+                                    .or_insert(false)
+                            {
+                                cfg_worklist.push((block, cfg.get_block(block).children[0]));
+                            }
+                            if !*executable
+                                .entry((block, cfg.get_block(block).children[1]))
+                                .or_insert(false)
+                            {
+                                cfg_worklist.push((block, cfg.get_block(block).children[1]));
+                            }
+                        }};
+                    }
+                    match (result[*x as usize], result[*y as usize]) {
+                        (Lattice::Top, _) => {}
+                        (_, Lattice::Top) => {}
+                        (Lattice::CopyOf(reg), Lattice::CopyOf(reg2)) => {
+                            append_non_executable!(reg, reg2)
+                        }
+                        (Lattice::Bottom, Lattice::CopyOf(reg)) => append_non_executable!(reg, *x),
+                        (Lattice::CopyOf(reg), Lattice::Bottom) => append_non_executable!(reg, *y),
+                        _ => append_non_executable!(1, 2),
+                    }
+                }
+                crate::ir::Operator::J(_) => {
+                    if !*executable
+                        .entry((block, cfg.get_block(block).children[0]))
+                        .or_insert(false)
+                    {
+                        cfg_worklist.push((block, cfg.get_block(block).children[0]));
+                    }
+                }
+                crate::ir::Operator::Beq(x, y, _, _) => {
+                    macro_rules! append_non_executable {
+                        ($reg1:expr, $reg2:expr) => {{
+                            if $reg1 != $reg2
+                                && !*executable
+                                    .entry((block, cfg.get_block(block).children[1]))
+                                    .or_insert(false)
+                            {
+                                cfg_worklist.push((block, cfg.get_block(block).children[1]));
+                            }
+                            if !*executable
+                                .entry((block, cfg.get_block(block).children[1]))
+                                .or_insert(false)
+                            {
+                                cfg_worklist.push((block, cfg.get_block(block).children[0]));
+                            }
+                        }};
+                    }
+                    match (result[*x as usize], result[*y as usize]) {
+                        (Lattice::Top, _) => {}
+                        (_, Lattice::Top) => {}
+                        (Lattice::CopyOf(reg), Lattice::CopyOf(reg2)) => {
+                            append_non_executable!(reg, reg2)
+                        }
+                        (Lattice::Bottom, Lattice::CopyOf(reg)) => append_non_executable!(reg, *x),
+                        (Lattice::CopyOf(reg), Lattice::Bottom) => append_non_executable!(reg, *y),
+                        _ => append_non_executable!(1, 2),
+                    }
+                }
+                crate::ir::Operator::Mv(x, y) => {
+                    let res = match &result[*y as usize] {
+                        Lattice::Bottom => Lattice::CopyOf(*y),
+                        l => *l,
+                    };
+                    result[*x as usize] = res;
+                }
+                _ => {
+                    if let Some(receiver) = receiver {
+                        result[receiver as usize] = Lattice::Bottom;
+                    }
+                }
+            },
+            SSAOperator::Phi(x, vec) => {
+                let mut res = Lattice::Top;
+                for (pred, reg) in vec.iter().enumerate() {
+                    let pred = cfg.get_block(block).preds[pred];
+                    if *executable.entry((pred, block)).or_insert(false) && *reg != u32::MAX {
+                        res = res.meet(&result[*reg as usize], *x, *reg);
+                    }
+                }
+                result[*x as usize] = res;
+            }
+        }
+        if let Some(receiver) = receiver {
+            if old.unwrap() != result[receiver as usize] {
+                ssa_worklist.extend(ssa_graph[receiver as usize].iter())
+            }
+        }
+    }
+
+    pub fn optimize(cfg: &mut CFG<SSAOperator>) {
+        let set: HashMap<_, _> =
+            HashMap::from_iter(build_set(cfg).into_iter().enumerate().filter_map(|(i, v)| {
+                if let Lattice::CopyOf(r) = v {
+                    Some((i as u32, r))
+                } else {
+                    None
+                }
+            }));
+        propagate(cfg, &set);
+    }
+
+    fn build_set(cfg: &CFG<SSAOperator>) -> Vec<Lattice> {
+        let ssa_graph = cfg.ssa_graph();
+        let mut cfg_worklist = vec![(usize::MAX, cfg.get_entry())];
+        let mut ssa_worklist: Vec<(&SSAOperator, usize)> = Vec::default();
+        let mut executable = HashMap::new();
+        let mut result = vec![Lattice::Top; cfg.get_max_reg() as usize];
+
+        while !cfg_worklist.is_empty() || !ssa_worklist.is_empty() {
+            if let Some((pred, child)) = cfg_worklist.pop() {
+                let block = cfg.get_block(child);
+                let past = executable.insert((pred, child), true);
+                let mut body = block.body.iter();
+                while let Some(op @ SSAOperator::Phi(..)) = body.next() {
+                    visit_op(
+                        op,
+                        child,
+                        cfg,
+                        &mut result,
+                        &mut cfg_worklist,
+                        &mut ssa_worklist,
+                        &mut executable,
+                        &ssa_graph,
+                    );
+                }
+                if !matches!(past, Some(true)) {
+                    for op in block.body.iter() {
+                        visit_op(
+                            op,
+                            child,
+                            cfg,
+                            &mut result,
+                            &mut cfg_worklist,
+                            &mut ssa_worklist,
+                            &mut executable,
+                            &ssa_graph,
+                        );
+                    }
+                }
+            }
+            if let Some((op, block)) = ssa_worklist.pop() {
+                if matches!(op, SSAOperator::Phi(..))
+                    || cfg
+                        .get_block(block)
+                        .preds
+                        .iter()
+                        .any(|pred| *executable.entry((*pred, block)).or_insert(false))
+                {
+                    visit_op(
+                        op,
+                        block,
+                        cfg,
+                        &mut result,
+                        &mut cfg_worklist,
+                        &mut ssa_worklist,
+                        &mut executable,
+                        &ssa_graph,
+                    );
+                }
+            }
+        }
+        result
+    }
+
+    fn propagate(cfg: &mut CFG<SSAOperator>, set: &HashMap<VReg, VReg>) {
+        for block in cfg.get_blocks_mut() {
+            let mut old = Vec::new();
+            std::mem::swap(&mut old, &mut block.body);
+            block.body = old
+                .into_iter()
+                .filter_map(|op| {
+                    if let Some(receiver) = op.receiver() {
+                        if set.contains_key(&receiver) {
+                            return None;
+                        }
+                    }
+                    let mut res = op;
+                    for (&k, &v) in set {
+                        res.replace_reg(k, v);
+                    }
+                    Some(res)
+                })
+                .collect();
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::rc::Rc;
+
+        use crate::{
+            ir::{Operator, CFG},
+            ssa::{copy_propagation::build_set, gvn_pre},
+        };
+
+        #[test]
+        fn sample_phi() {
+            let l1: Rc<str> = "Label1".into();
+            let l2: Rc<str> = "Label2".into();
+            let l3: Rc<str> = "Label3".into();
+            let l4: Rc<str> = "Label4".into();
+            let body = vec![
+                Operator::Li(1, 3),
+                Operator::J(Rc::clone(&l4)),
+                Operator::Label(Rc::clone(&l4)),
+                Operator::Li(2, 5),
+                Operator::Add(3, 1, 2),
+                Operator::Beq(1, 2, Rc::clone(&l1), Rc::clone(&l2)),
+                Operator::Label(Rc::clone(&l1)),
+                Operator::Sub(4, 3, 2),
+                Operator::Xor(3, 4, 3),
+                Operator::J(Rc::clone(&l3)),
+                Operator::Label(Rc::clone(&l2)),
+                Operator::Sub(4, 3, 2),
+                Operator::And(3, 4, 3),
+                Operator::Sub(7, 3, 1),
+                Operator::J(Rc::clone(&l3)),
+                Operator::Label(Rc::clone(&l3)),
+                Operator::Sub(6, 3, 1),
+                Operator::J(Rc::clone(&l4)),
+            ];
+            println!("{}", crate::ir::Displayable(&body[..]));
+
+            let cfg = CFG::from_linear(body, vec![], 8);
+            let mut ssa = cfg.to_ssa();
+            println!("Before GVN-PRE: \n{}", ssa.to_dot());
+            gvn_pre::optimize(&mut ssa);
+            println!("After GVN-PRE: \n{}", ssa.to_dot());
+            let lattice = build_set(&ssa);
+            println!("Copy Propagation Lattice: \n{:?}", lattice);
+            super::optimize(&mut ssa);
+            println!("After copy propagation: \n{}", ssa.to_dot());
         }
     }
 }

@@ -145,6 +145,62 @@ pub enum Operator {
     GetParameter(VReg, u64),
     Nop,
 }
+impl Operator {
+    pub fn receiver(&self) -> Option<VReg> {
+        match self {
+            Operator::Add(x, _, _)
+            | Operator::Sub(x, _, _)
+            | Operator::Mult(x, _, _)
+            | Operator::Div(x, _, _)
+            | Operator::And(x, _, _)
+            | Operator::Or(x, _, _)
+            | Operator::Mv(x, _)
+            | Operator::Xor(x, _, _)
+            | Operator::Load(x, _, _)
+            | Operator::La(x, _)
+            | Operator::Li(x, _)
+            | Operator::Slt(x, _, _)
+            | Operator::Call(x, _, _)
+            | Operator::GetParameter(x, _) => Some(*x),
+            _ => None,
+        }
+    }
+    pub fn replace_reg(&mut self, reg: VReg, with: VReg) {
+        macro_rules! replace {
+            ($($x:expr),+) => {
+            {
+                $(
+                if *$x == reg {
+                    *$x = with;
+                }
+                )+
+            }
+            };
+        }
+        match self {
+            Operator::Add(_, y, z)
+            | Operator::Sub(_, y, z)
+            | Operator::Mult(_, y, z)
+            | Operator::Div(_, y, z)
+            | Operator::And(_, y, z)
+            | Operator::Slt(_, y, z)
+            | Operator::Or(_, y, z)
+            | Operator::Xor(_, y, z)
+            | Operator::Bgt(z, y, _, _)
+            | Operator::Bl(z, y, _, _)
+            | Operator::Beq(z, y, _, _)
+            | Operator::Load(_, y, z) => replace!(y, z),
+            Operator::Return(y) | Operator::Mv(_, y) => replace!(y),
+            Operator::Store(x, y, z) => replace!(x, y, z),
+            Operator::Call(.., z) => {
+                for r in z {
+                    replace!(r);
+                }
+            }
+            _ => {}
+        }
+    }
+}
 
 pub struct Displayable<'a, O>(pub &'a [O]);
 
@@ -545,6 +601,27 @@ pub enum SSAOperator {
     IROp(Operator),
     Phi(VReg, Vec<VReg>),
 }
+
+impl SSAOperator {
+    pub fn receiver(&self) -> Option<VReg> {
+        match self {
+            SSAOperator::IROp(op) => op.receiver(),
+            SSAOperator::Phi(x, _) => Some(*x),
+        }
+    }
+    pub fn replace_reg(&mut self, reg: VReg, with: VReg) {
+        match self {
+            SSAOperator::IROp(o) => o.replace_reg(reg, with),
+            SSAOperator::Phi(_, vec) => {
+                for r in vec {
+                    if *r == reg {
+                        *r = with;
+                    }
+                }
+            }
+        }
+    }
+}
 #[derive(Debug)]
 pub struct Block<O> {
     pub label: Rc<str>,
@@ -597,6 +674,9 @@ impl<O> CFG<O> {
     }
     pub fn get_max_reg(&self) -> VReg {
         self.max_reg
+    }
+    pub fn set_max_reg(&mut self, max_reg: VReg) {
+        self.max_reg = max_reg;
     }
     pub fn get_block(&self, i: usize) -> &Block<O> {
         self.blocks.get(i).unwrap()
@@ -1094,6 +1174,52 @@ impl CFG<Operator> {
                 .map(|(k, v)| (k, v.into_iter().collect()))
                 .collect(),
         )
+    }
+}
+
+impl CFG<SSAOperator> {
+    pub fn ssa_graph(&self) -> Vec<Vec<(&SSAOperator, usize)>> {
+        let mut result = vec![Vec::default(); self.max_reg as usize];
+        for (i, block) in self.blocks.iter().enumerate() {
+            for op in &block.body {
+                macro_rules! push_operands {
+                    ($($x:expr),+) => {
+                        {$(result[*$x as usize].push((op, i));)+}
+                    };
+                }
+                match op {
+                    SSAOperator::IROp(op_) => match op_ {
+                        Operator::Add(_, x, y) => push_operands!(x, y),
+                        Operator::Sub(_, x, y) => push_operands!(x, y),
+                        Operator::Mult(_, x, y) => push_operands!(x, y),
+                        Operator::Div(_, x, y) => push_operands!(x, y),
+                        Operator::And(_, x, y) => push_operands!(x, y),
+                        Operator::Or(_, x, y) => push_operands!(x, y),
+                        Operator::Mv(_, x) => push_operands!(x),
+                        Operator::Xor(_, x, y) => push_operands!(x, y),
+                        Operator::Load(_, x, y) => push_operands!(x, y),
+                        Operator::Store(z, x, y) => push_operands!(x, y, z),
+                        Operator::Bgt(x, y, _, _) => push_operands!(x, y),
+                        Operator::Bl(x, y, _, _) => push_operands!(x, y),
+                        Operator::Beq(x, y, _, _) => push_operands!(x, y),
+                        Operator::Slt(_, x, y) => push_operands!(x, y),
+                        Operator::Call(_, _, vec) => {
+                            for &o in vec {
+                                result[o as usize].push((op, i))
+                            }
+                        }
+                        Operator::Return(x) => push_operands!(x),
+                        _ => {}
+                    },
+                    SSAOperator::Phi(_, v) => {
+                        for &o in v.iter().filter(|&&r| r != u32::MAX) {
+                            result[o as usize].push((op, i));
+                        }
+                    }
+                }
+            }
+        }
+        result
     }
 }
 
