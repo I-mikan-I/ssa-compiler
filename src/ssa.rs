@@ -756,7 +756,7 @@ pub mod gvn_pre {
             let cfg = CFG::from_linear(body, vec![], 3);
             let mut ssa = cfg.to_ssa();
             let (leaders, antic_in, _, mut table) = build_sets(&mut ssa);
-            assert_eq!(leaders.len(), 1);
+            assert_eq!(leaders.len(), 2);
             let value_3 = table.maybe_insert(Expression::Immediate(3));
             let value_5 = table.maybe_insert(Expression::Immediate(5));
             let value_sum = table.maybe_insert(Expression::Plus(value_5, value_3));
@@ -792,8 +792,8 @@ pub mod gvn_pre {
             let cfg = CFG::from_linear(body, vec![], 3);
             let mut ssa = cfg.to_ssa();
             let (leaders, antic_in, _, mut table) = build_sets(&mut ssa);
-            assert_eq!(leaders.len(), 2);
-            assert_eq!(antic_in.len(), 2);
+            assert_eq!(leaders.len(), 3);
+            assert_eq!(antic_in.len(), 3);
             let value_3 = table.maybe_insert(Expression::Immediate(3));
             let value_5 = table.maybe_insert(Expression::Immediate(5));
             let value_sum = table.maybe_insert(Expression::Plus(value_3, value_5));
@@ -849,8 +849,8 @@ pub mod gvn_pre {
             let cfg = CFG::from_linear(body, vec![], 3);
             let mut ssa = cfg.to_ssa();
             let (leaders, antic_in, _, mut table) = build_sets(&mut ssa);
-            assert_eq!(leaders.len(), 2);
-            assert_eq!(antic_in.len(), 2);
+            assert_eq!(leaders.len(), 3);
+            assert_eq!(antic_in.len(), 3);
             let value_3 = table.maybe_insert(Expression::Immediate(3));
             let value_5 = table.maybe_insert(Expression::Immediate(5));
             let value_slt = table.maybe_insert(Expression::Reg(6));
@@ -906,8 +906,8 @@ pub mod gvn_pre {
             let cfg = CFG::from_linear(body, vec![], 5);
             let mut ssa = cfg.to_ssa();
             let (leaders, antic_in, _, mut table) = build_sets(&mut ssa);
-            assert_eq!(leaders.len(), 3);
-            assert_eq!(antic_in.len(), 3);
+            assert_eq!(leaders.len(), 4);
+            assert_eq!(antic_in.len(), 4);
             let value_3 = table.maybe_insert(Expression::Immediate(3));
             let value_5 = table.maybe_insert(Expression::Immediate(5));
             let value_sum = table.maybe_insert(Expression::Plus(value_3, value_5));
@@ -988,8 +988,8 @@ pub mod gvn_pre {
             let cfg = CFG::from_linear(body, vec![], 5);
             let mut ssa = cfg.to_ssa();
             let (leaders, antic_in, _, mut table) = build_sets(&mut ssa);
-            assert_eq!(leaders.len(), 5);
-            assert_eq!(antic_in.len(), 5);
+            assert_eq!(leaders.len(), 6);
+            assert_eq!(antic_in.len(), 6);
             let value_3 = table.maybe_insert(Expression::Immediate(3));
             let value_5 = table.maybe_insert(Expression::Immediate(5));
             let value_sum = table.maybe_insert(Expression::Plus(value_3, value_5));
@@ -1087,8 +1087,8 @@ pub mod gvn_pre {
             let cfg = CFG::from_linear(body, vec![], 5);
             let mut ssa = cfg.to_ssa();
             let (leaders, antic_in, _, mut table) = build_sets(&mut ssa);
-            assert_eq!(leaders.len(), 5);
-            assert_eq!(antic_in.len(), 5);
+            assert_eq!(leaders.len(), 6);
+            assert_eq!(antic_in.len(), 6);
             let value_3 = table.maybe_insert(Expression::Immediate(3));
             let value_5 = table.maybe_insert(Expression::Immediate(5));
             let value_phi1 = table.maybe_insert(Expression::Phi(vec![8, 14]));

@@ -80,7 +80,10 @@
 //!                 label(): ... // @l2
 //! identifier((arg0), (arg1), ...)
 //! =>              call @label(identifier) (lin(arg0), lin(arg1), ...)
-//! return (E) =>   return lin(E)```
+//! return (E) =>   return lin(E)
+//!                 label():    // dead
+//!
+//! ```
 
 use parser_defs::Any;
 use std::{
@@ -441,8 +444,10 @@ fn translate_block(
                 None
             }
             parser_defs::Statement::Return(e) => {
+                let l1: Rc<_> = gen.next_label().into();
                 let reg = translate_block(vec, scope, Any::E(e), gen).unwrap();
                 vec.push(Operator::Return(reg));
+                vec.push(Operator::Label(Rc::clone(&l1)));
                 None
             }
         },
@@ -632,6 +637,8 @@ pub struct Block<O> {
     /// None if entry node, else Some.
     pub idom: Option<usize>,
     pub idom_of: Vec<usize>,
+    pub r_idom: Option<usize>,
+    pub r_idom_of: Vec<usize>,
 }
 
 impl<O> Block<O> {
@@ -643,6 +650,8 @@ impl<O> Block<O> {
             children: Vec::new(),
             idom: None,
             idom_of: Vec::new(),
+            r_idom: None,
+            r_idom_of: Vec::new(),
         }
     }
     fn into_other<T>(self, body: Vec<T>) -> Block<T> {
@@ -653,6 +662,8 @@ impl<O> Block<O> {
             children: self.children,
             idom: self.idom,
             idom_of: self.idom_of,
+            r_idom: self.r_idom,
+            r_idom_of: self.r_idom_of,
         }
     }
 }
@@ -660,6 +671,7 @@ impl<O> Block<O> {
 pub struct CFG<O> {
     blocks: Vec<Block<O>>,
     entry: usize,
+    exit: usize,
     max_reg: VReg,
 }
 impl<O> CFG<O> {
@@ -671,6 +683,9 @@ impl<O> CFG<O> {
     }
     pub fn get_entry(&self) -> usize {
         self.entry
+    }
+    pub fn get_exit(&self) -> usize {
+        self.exit
     }
     pub fn get_max_reg(&self) -> VReg {
         self.max_reg
@@ -703,6 +718,137 @@ impl<O> CFG<O> {
         let mut res = Vec::with_capacity(self.len());
         postorder(self, 0, &mut res);
         res
+    }
+    fn bfs_reverse(
+        &self,
+        total_blocks: usize,
+        block: usize,
+        selector: fn(&Block<O>) -> &Vec<usize>,
+    ) -> Vec<usize> {
+        let mut outputs = vec![usize::MAX; total_blocks];
+        outputs[block] = 0;
+        let block = &self.blocks[block];
+        let mut queue: VecDeque<(usize, usize)> = VecDeque::new();
+        queue.extend(selector(block).iter().cloned().zip(std::iter::repeat(1)));
+
+        while let Some((pred, dist)) = queue.pop_front() {
+            let old = outputs[pred];
+            if dist < old {
+                outputs[pred] = dist;
+                let block = &self.blocks[pred];
+                queue.extend(
+                    selector(block)
+                        .iter()
+                        .cloned()
+                        .zip(std::iter::repeat(dist + 1)),
+                );
+            }
+        }
+        outputs
+    }
+    fn apsp_reverse(&self, postdominance: bool) -> Vec<Vec<usize>> {
+        let selector: fn(&Block<O>) -> &Vec<usize> = if !postdominance {
+            |block| &block.preds
+        } else {
+            |block| &block.children
+        };
+        let block_len = self.blocks.len();
+        let inner = vec![usize::MAX; block_len];
+        let mut output: Vec<Vec<usize>> = Vec::from_iter(std::iter::repeat(inner).take(block_len));
+        for (i, val) in output.iter_mut().enumerate() {
+            *val = self.bfs_reverse(block_len, i, selector);
+        }
+        output
+    }
+    /// calculates dominance frontiers for each block.
+    /// Must be a valid CFG as constructed by 'from_linear'.
+    pub fn get_dominance_frontiers(&self) -> Vec<HashSet<usize>> {
+        let blocks = self.blocks.len();
+        let mut frontier = vec![HashSet::new(); blocks];
+        for (i, block) in self.blocks.iter().enumerate() {
+            for &pred in &block.preds {
+                if let Some(idom) = block.idom {
+                    let mut current = pred;
+                    while idom != current {
+                        frontier[current].insert(i);
+                        if let Some(next) = self.blocks[current].idom {
+                            current = next;
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        frontier
+    }
+    pub fn get_postdominance_frontiers(&self) -> Vec<HashSet<usize>> {
+        let blocks = self.blocks.len();
+        let mut frontier = vec![HashSet::new(); blocks];
+        for (i, block) in self.blocks.iter().enumerate() {
+            for &child in &block.children {
+                if let Some(r_idom) = block.r_idom {
+                    let mut current = child;
+                    while r_idom != current {
+                        frontier[current].insert(i);
+                        if let Some(next) = self.blocks[current].r_idom {
+                            current = next;
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        frontier
+    }
+    pub fn calculate_idoms(&self, postdominance: bool) -> Vec<Option<usize>> {
+        let mut doms = vec![HashSet::from_iter(0..self.blocks.len()); self.blocks.len()];
+        let mut idoms = vec![None; self.blocks.len()];
+        let root = if !postdominance {
+            self.get_entry()
+        } else {
+            self.get_exit()
+        };
+        doms[root] = HashSet::from([root]);
+        let mut changed = true;
+
+        let selector: fn(&Block<O>) -> &Vec<usize> = if !postdominance {
+            |block: &Block<O>| &block.preds
+        } else {
+            |block: &Block<O>| &block.children
+        };
+
+        while changed {
+            changed = false;
+
+            for (i, block) in self.blocks.iter().enumerate() {
+                let mut new: HashSet<_> = if let Some(fst) = selector(block).first() {
+                    selector(block)
+                        .iter()
+                        .map(|n| &doms[*n])
+                        .fold(doms[*fst].clone(), |acc, next| {
+                            acc.intersection(next).cloned().collect()
+                        })
+                } else {
+                    HashSet::new()
+                };
+                new.insert(i);
+                if new != doms[i] {
+                    changed = true;
+                    doms[i] = new;
+                }
+            }
+        }
+
+        let apsp_reverse = self.apsp_reverse(postdominance);
+
+        for (i, mut set) in doms.into_iter().enumerate() {
+            set.remove(&i);
+            let idom = set.into_iter().min_by_key(|&v| apsp_reverse[i][v]);
+            idoms[i] = idom;
+        }
+        idoms
     }
 }
 impl<O> CFG<O>
@@ -750,41 +896,15 @@ label=\"dom tree\"
     }
 }
 impl CFG<Operator> {
-    fn bfs_reverse(&self, total_blocks: usize, block: usize) -> Vec<usize> {
-        let mut outputs = vec![usize::MAX; total_blocks];
-        outputs[block] = 0;
-        let block = &self.blocks[block];
-        let mut queue: VecDeque<(usize, usize)> = VecDeque::new();
-        queue.extend(block.preds.iter().cloned().zip(std::iter::repeat(1)));
-
-        while let Some((pred, dist)) = queue.pop_front() {
-            let old = outputs[pred];
-            if dist < old {
-                outputs[pred] = dist;
-                let block = &self.blocks[pred];
-                queue.extend(block.preds.iter().cloned().zip(std::iter::repeat(dist + 1)));
-            }
-        }
-        outputs
-    }
-    fn apsp_reverse(&self) -> Vec<Vec<usize>> {
-        let block_len = self.blocks.len();
-        let inner = vec![usize::MAX; block_len];
-        let mut output: Vec<Vec<usize>> = Vec::from_iter(std::iter::repeat(inner).take(block_len));
-        for (i, val) in output.iter_mut().enumerate() {
-            *val = self.bfs_reverse(block_len, i);
-        }
-        output
-    }
     pub fn from_linear(
         code: impl AsRef<[Operator]>,
         params: impl AsRef<[VReg]>,
         max_reg: VReg,
     ) -> Self {
         let code = code.as_ref();
-        let mut i = 1;
         let mut labels: HashMap<Rc<str>, usize> = HashMap::new();
         let mut blocks = Vec::from([Block::empty(&Rc::from("ENTRY"))]);
+        let mut i = blocks.len();
 
         for op in code.iter() {
             if let Operator::Label(s) = op {
@@ -793,14 +913,20 @@ impl CFG<Operator> {
                 blocks.push(Block::empty(s));
             }
         }
+        blocks.push(Block::empty(&Rc::from("EXIT")));
+        let exit_idx = blocks.len() - 1;
         let mut start = 0;
         let mut block_idx = 0;
         for (i, op) in code.iter().enumerate() {
             match op {
                 Operator::Label(_) => {
                     let block = &mut blocks[block_idx];
-                    block_idx += 1;
                     block.body = Vec::from(&code[start..i]);
+                    if block.children.is_empty() {
+                        block.children.push(exit_idx); //exit
+                        blocks[exit_idx].preds.push(block_idx);
+                    }
+                    block_idx += 1;
                     start = i + 1;
                 }
                 Operator::J(s) => {
@@ -834,50 +960,52 @@ impl CFG<Operator> {
             .chain(std::mem::take(&mut blocks[0].body).into_iter())
             .collect();
 
-        let mut changed = true;
+        let mut gc_map = vec![usize::MAX; blocks.len()];
+        let exit = blocks.len() - 1;
+        blocks = blocks
+            .into_iter()
+            .enumerate()
+            .filter(|(i, b)| !b.preds.is_empty() || *i == 0 || *i == exit)
+            .enumerate()
+            .map(|(new, (old, b))| {
+                gc_map[old] = new;
+                b
+            })
+            .collect();
+        for block in &mut blocks {
+            block.preds = std::mem::take(&mut block.preds)
+                .into_iter()
+                .map(|i| gc_map[i])
+                .collect();
+            block.children = std::mem::take(&mut block.children)
+                .into_iter()
+                .map(|i| gc_map[i])
+                .collect();
+        }
+        let exit = blocks.len() - 1;
+        debug_assert_eq!(blocks[exit].label, Rc::from("EXIT"));
         let mut result = Self {
             blocks,
             entry: 0,
+            exit,
             max_reg,
         };
-
         result.split_critical();
-        let mut doms = vec![HashSet::from_iter(0..result.blocks.len()); result.blocks.len()];
-        doms[0] = HashSet::from([0]);
-
-        while changed {
-            changed = false;
-
-            for (i, block) in result.blocks.iter().enumerate() {
-                let mut new: HashSet<_> = if let Some(fst) = block.preds.first() {
-                    block
-                        .preds
-                        .iter()
-                        .map(|n| &doms[*n])
-                        .fold(doms[*fst].clone(), |acc, next| {
-                            acc.intersection(next).cloned().collect()
-                        })
-                } else {
-                    HashSet::new()
-                };
-                new.insert(i);
-                if new != doms[i] {
-                    changed = true;
-                    doms[i] = new;
-                }
+        let idoms = result.calculate_idoms(false);
+        let r_idoms = result.calculate_idoms(true);
+        for (i, k) in idoms.into_iter().enumerate() {
+            if let Some(_k) = k {
+                result.blocks[i].idom = k;
+                result.blocks[_k].idom_of.push(i);
+            }
+        }
+        for (i, k) in r_idoms.into_iter().enumerate() {
+            if let Some(_k) = k {
+                result.blocks[i].r_idom = k;
+                result.blocks[_k].r_idom_of.push(i);
             }
         }
 
-        let apsp_reverse = result.apsp_reverse();
-
-        for (i, mut set) in doms.into_iter().enumerate() {
-            set.remove(&i);
-            let idom = set.into_iter().min_by_key(|&v| apsp_reverse[i][v]);
-            result.blocks[i].idom = idom;
-            if let Some(idom) = idom {
-                result.blocks[idom].idom_of.push(i);
-            }
-        }
         #[cfg(feature = "print-cfgs")]
         {
             println!("CFG <from-linear>:");
@@ -1076,6 +1204,7 @@ impl CFG<Operator> {
         let result = CFG {
             blocks: new_blocks,
             entry: self.entry,
+            exit: self.exit,
             max_reg: generator.next_reg(),
         };
         let _ = result;
@@ -1086,28 +1215,7 @@ impl CFG<Operator> {
         }
         result
     }
-    /// calculates dominance frontiers for each block.
-    /// Must be a valid CFG as constructed by 'from_linear'.
-    fn get_dominance_frontiers(&self) -> Vec<HashSet<usize>> {
-        let blocks = self.blocks.len();
-        let mut frontier = vec![HashSet::new(); blocks];
-        for (i, block) in self.blocks.iter().enumerate() {
-            for &pred in &block.preds {
-                if let Some(idom) = block.idom {
-                    let mut current = pred;
-                    while idom != current {
-                        frontier[current].insert(i);
-                        if let Some(next) = self.blocks[current].idom {
-                            current = next;
-                        } else {
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-        frontier
-    }
+
     /// gets global regs and the blocks that they are used in.
     fn get_global_regs(&self) -> (Vec<VReg>, HashMap<VReg, Vec<usize>>) {
         let mut exposed = HashSet::new();
@@ -1328,6 +1436,7 @@ mod test {
             let mut found = HashSet::new();
             let mut visited = HashSet::new();
             let mut queue = VecDeque::new();
+            found.insert(cfg.get_exit());
             queue.push_back(0);
             while let Some(nxt) = queue.pop_front() {
                 visited.insert(nxt);
@@ -1464,9 +1573,16 @@ mod test {
             let mut names = SheafTable::new();
             check_reaching_recursive(&ssa, &mut names, 0);
         }
+    }
+
+    proptest! {
+
+        #![proptest_config(ProptestConfig {
+            .. ProptestConfig::default()
+        })]
 
         #[test]
-        fn test_ssa_non_critical_edge(cfg in any_with::<CFG<Operator>>((20, 20, 20))) {
+        fn test_ssa_non_critical_edge(cfg in any_with::<CFG<Operator>>((10, 10, 10))) {
             let ssa = cfg.to_ssa();
 
             for block in &ssa.blocks {

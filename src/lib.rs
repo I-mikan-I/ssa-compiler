@@ -53,7 +53,8 @@ mod tests {
         mv rd1, rd6
         j @_LABEL_2
 @_LABEL_2:
-        return rd1";
+        return rd1
+@_LABEL_3:";
         assert_eq!(
             expected
                 .chars()
@@ -140,7 +141,8 @@ mod tests {
 @_LABEL_5:
         j @_LABEL_0
 @_LABEL_1:
-        return rd1";
+        return rd1
+@_LABEL_6:";
         assert_eq!(
             expected
                 .chars()
@@ -177,8 +179,10 @@ mod tests {
         assert_eq!(cfg.get_block(4).idom.unwrap(), 2);
         assert_eq!(cfg.get_block(5).children, vec![1]);
         assert_eq!(cfg.get_block(5).idom.unwrap(), 2);
-        assert_eq!(cfg.get_block(6).children, vec![]);
+        assert_eq!(cfg.get_block(6).children, vec![7]);
         assert_eq!(cfg.get_block(6).idom.unwrap(), 1);
+        assert_eq!(cfg.get_block(7).children, vec![]);
+        assert_eq!(cfg.get_block(7).idom.unwrap(), 6)
     }
 
     #[test]
