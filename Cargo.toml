@@ -9,6 +9,7 @@ edition = "2021"
 cfgrammar = "0.13.1"
 lrlex = "0.13.1"
 lrpar = "0.13.1"
+z3 = {version="0.11.2", features = ["static-link-z3"]}
 
 [dependencies.parser_defs]
 path = "parser"

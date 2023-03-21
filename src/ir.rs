@@ -149,6 +149,33 @@ pub enum Operator {
     Nop,
 }
 impl Operator {
+    pub fn dependencies(&self) -> Vec<VReg> {
+        match self {
+            Operator::Add(_, y, z)
+            | Operator::Sub(_, y, z)
+            | Operator::Mult(_, y, z)
+            | Operator::Div(_, y, z)
+            | Operator::Bl(z, y, _, _)
+            | Operator::Slt(_, y, z)
+            | Operator::Bgt(z, y, _, _)
+            | Operator::Load(_, y, z)
+            | Operator::Beq(z, y, _, _)
+            | Operator::And(_, y, z)
+            | Operator::Xor(_, y, z)
+            | Operator::Or(_, y, z) => {
+                vec![*y, *z]
+            }
+            Operator::Mv(_, y) => {
+                vec![*y]
+            }
+            Operator::Store(x, y, z) => {
+                vec![*x, *y, *z]
+            }
+            Operator::Call(_, _, z) => z.clone(),
+            Operator::Return(x) => vec![*x],
+            _ => vec![],
+        }
+    }
     pub fn receiver(&self) -> Option<VReg> {
         match self {
             Operator::Add(x, _, _)
@@ -654,7 +681,7 @@ impl<O> Block<O> {
             r_idom_of: Vec::new(),
         }
     }
-    fn into_other<T>(self, body: Vec<T>) -> Block<T> {
+    pub fn into_other<T>(self, body: Vec<T>) -> Block<T> {
         Block {
             label: self.label,
             body,
@@ -669,12 +696,20 @@ impl<O> Block<O> {
 }
 #[derive(Debug)]
 pub struct CFG<O> {
-    blocks: Vec<Block<O>>,
+    pub blocks: Vec<Block<O>>,
     entry: usize,
     exit: usize,
     max_reg: VReg,
 }
 impl<O> CFG<O> {
+    pub fn into_other<A>(self, blocks: Vec<Block<A>>) -> CFG<A> {
+        CFG {
+            blocks,
+            entry: self.entry,
+            exit: self.exit,
+            max_reg: self.max_reg,
+        }
+    }
     pub fn get_blocks(&self) -> &[Block<O>] {
         &self.blocks
     }
@@ -859,10 +894,11 @@ where
         let mut adjacencies = String::new();
         let mut attributes = String::new();
         let mut dominance = String::new();
+        let mut postdominance = String::new();
         for (i, block) in self.blocks.iter().enumerate() {
             adjacencies.extend(block.children.iter().map(|j| format!("{i}->{j}\n")));
             attributes.push_str(&format!(
-                "{i}[label=\"{{{0}|{1}}}\"]\ndom{i}[label=\"{0}\"]\n",
+                "{i}[label=\"{{{0}|{1}}}\"]\ndom{i}[label=\"{0}\"]\npdom{i}[label=\"{0}\"]\n",
                 block.label,
                 Displayable(&block.body)
                     .to_string()
@@ -878,6 +914,9 @@ where
             if let Some(idom) = block.idom {
                 dominance.push_str(&format!("dom{}->dom{i}\n", idom));
             }
+            if let Some(idom) = block.r_idom {
+                postdominance.push_str(&format!("pdom{}->pdom{i}\n", idom))
+            }
         }
         format!(
             "
@@ -889,6 +928,11 @@ node [shape=record]
 subgraph cluster_dominance {{
 label=\"dom tree\"
 {dominance}
+}}
+
+subgraph cluster_postdominance {{
+label=\"postdom tree\"
+{postdominance}
 }}
 
 {attributes}}}"
@@ -1069,7 +1113,7 @@ impl CFG<Operator> {
         let current = block;
         for &global in globals.iter() {
             let last = names.entry(global).or_default();
-            let next = last.last().cloned().unwrap_or(u32::MAX); // should never be used
+            let next = last.last().cloned().unwrap_or(u32::MAX); // undefined
             last.push(next);
         }
         for op in &mut phis[current] {

@@ -1,3 +1,17 @@
+use std::error::Error;
+
+use crate::ir::{SSAOperator, CFG};
+
+pub fn optimization_sequence(ssa: &mut CFG<SSAOperator>) -> Result<(), Box<dyn Error>> {
+    gvn_pre::optimize(ssa);
+    copy_propagation::optimize(ssa);
+    #[cfg(feature = "print-cfgs")]
+    {
+        println!("After optimization:\n{}", ssa.to_dot());
+    }
+    Ok(())
+}
+
 pub mod gvn_pre {
     #![allow(clippy::too_many_arguments)]
     use std::collections::{HashMap, HashSet, LinkedList};
@@ -22,6 +36,7 @@ pub mod gvn_pre {
         Xor(Value, Value),
         Mv(Value),
         Immediate(i64),
+        /// Reg only appears in exp_gen/antileaders if the expression that generated Reg isn't numbered.
         Reg(VReg),
         Phi(Vec<VReg>),
     }
@@ -193,9 +208,9 @@ pub mod gvn_pre {
                     Operator::Mv(rec, x) => {
                         let x = value_regs!(x);
                         let res = Expression::Mv(x).canon();
-                        let new = self.maybe_insert(Expression::Mv(x));
-                        self.insert_with(Expression::Reg(*rec), new);
-                        Ok((new, Some(*rec), res))
+                        self.insert_with(Expression::Mv(x), x);
+                        self.insert_with(Expression::Reg(*rec), x);
+                        Ok((x, Some(*rec), res))
                     }
                     Operator::Return(x) => {
                         let new = value_regs!(x);
@@ -884,6 +899,63 @@ pub mod gvn_pre {
         }
 
         #[test]
+        fn build_sets_trans_nokill() {
+            let l1: Rc<str> = "Label1".into();
+            let body = vec![
+                Operator::Li(1, 3),
+                Operator::Li(2, 5),
+                Operator::Sub(3, 1, 2),
+                Operator::J(Rc::clone(&l1)),
+                Operator::Label(Rc::clone(&l1)),
+                Operator::Mv(6, 3),
+                Operator::Sub(4, 3, 6),
+                Operator::Xor(5, 4, 3),
+                Operator::Return(5),
+            ];
+            println!("{}", crate::ir::Displayable(&body[..]));
+
+            let cfg = CFG::from_linear(body, vec![], 6);
+            let mut ssa = cfg.to_ssa();
+            let (leaders, antic_in, _, mut table) = build_sets(&mut ssa);
+            assert_eq!(leaders.len(), 3);
+            assert_eq!(antic_in.len(), 3);
+            let value_3 = table.maybe_insert(Expression::Immediate(3));
+            let value_5 = table.maybe_insert(Expression::Immediate(5));
+            let value_sub1 = table.maybe_insert(Expression::Sub(value_3, value_5));
+            let value_sub2 = table.maybe_insert(Expression::Sub(value_sub1, value_sub1));
+            let value_xor = table.maybe_insert(Expression::Xor(value_sub2, value_sub1));
+            assert_eq!(leaders[0].len(), 3);
+            assert_eq!(*leaders[0].get(&value_3).unwrap(), 7);
+            assert_eq!(*leaders[0].get(&value_5).unwrap(), 8);
+            assert_eq!(*leaders[0].get(&value_sub1).unwrap(), 9);
+            assert_eq!(leaders[1].len(), 5);
+            assert_eq!(*leaders[1].get(&value_3).unwrap(), 7);
+            assert_eq!(*leaders[1].get(&value_5).unwrap(), 8);
+            assert_eq!(*leaders[1].get(&value_sub1).unwrap(), 9);
+            assert_eq!(*leaders[1].get(&value_sub2).unwrap(), 11);
+            assert_eq!(*leaders[1].get(&value_xor).unwrap(), 12);
+
+            assert_eq!(
+                Vec::from_iter(antic_in[0].iter().cloned()),
+                &[
+                    (value_3, Expression::Immediate(3)),
+                    (value_5, Expression::Immediate(5)),
+                    (value_sub1, Expression::Sub(value_3, value_5)),
+                    (value_sub2, Expression::Sub(value_sub1, value_sub1)),
+                    (value_xor, Expression::Xor(value_sub1, value_sub2)),
+                ]
+            );
+            assert_eq!(
+                Vec::from_iter(antic_in[1].iter().cloned()),
+                &[
+                    (value_sub1, Expression::Reg(9)),
+                    (value_sub2, Expression::Sub(value_sub1, value_sub1)),
+                    (value_xor, Expression::Xor(value_sub1, value_sub2)),
+                ]
+            );
+        }
+
+        #[test]
         fn build_sets_if() {
             let l1: Rc<str> = "Label1".into();
             let l2: Rc<str> = "Label2".into();
@@ -1517,5 +1589,92 @@ pub mod copy_propagation {
             super::optimize(&mut ssa);
             println!("After copy propagation: \n{}", ssa.to_dot());
         }
+    }
+}
+
+pub mod liveness {
+    use std::collections::HashSet;
+
+    use crate::ir::{SSAOperator, VReg, CFG};
+
+    pub fn live_out(ssa: &CFG<SSAOperator>) -> Vec<HashSet<VReg>> {
+        let mut live_ins = vec![HashSet::new(); ssa.len()];
+        let mut live_outs = vec![HashSet::new(); ssa.len()];
+        let mut phi_uses = vec![HashSet::new(); ssa.len()];
+        let mut defs = vec![HashSet::new(); ssa.len()];
+
+        for (i, block) in ssa.get_blocks().iter().enumerate() {
+            for op in block.body.iter() {
+                if let Some(rec) = op.receiver() {
+                    defs[i].insert(rec);
+                }
+                macro_rules! insert_deps {
+                    ($($x:expr),+) => {
+                        {
+                            $(if !defs[i].contains($x) {
+                                live_ins[i].insert(*$x);
+                            })+
+                        }
+                    };
+                }
+                match op {
+                    SSAOperator::IROp(op) => match op {
+                        crate::ir::Operator::Add(_, y, z)
+                        | crate::ir::Operator::Sub(_, y, z)
+                        | crate::ir::Operator::Mult(_, y, z)
+                        | crate::ir::Operator::Slt(_, y, z)
+                        | crate::ir::Operator::Div(_, y, z)
+                        | crate::ir::Operator::Or(_, y, z)
+                        | crate::ir::Operator::Xor(_, y, z)
+                        | crate::ir::Operator::Load(_, y, z)
+                        | crate::ir::Operator::And(_, y, z) => insert_deps!(y, z),
+                        crate::ir::Operator::Store(x, y, z) => insert_deps!(x, y, z),
+                        crate::ir::Operator::Mv(_, y) => insert_deps!(y),
+                        crate::ir::Operator::Bl(x, y, ..)
+                        | crate::ir::Operator::Beq(x, y, ..)
+                        | crate::ir::Operator::Bgt(x, y, ..) => insert_deps!(x, y),
+                        crate::ir::Operator::Call(.., z) => {
+                            for rc in z {
+                                insert_deps!(rc);
+                            }
+                        }
+                        crate::ir::Operator::Return(x) => insert_deps!(x),
+                        _ => {}
+                    },
+                    SSAOperator::Phi(_, vec) => {
+                        for (i, reg) in vec.iter().enumerate() {
+                            phi_uses[block.preds[i]].insert(*reg);
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut changed = true;
+
+        while changed {
+            changed = false;
+            for i in 0..ssa.len() {
+                let succs = ssa.get_block(i).children.iter();
+                let mut new = phi_uses[i].clone();
+                for succ in succs {
+                    new.extend(live_ins[*succ].iter());
+                }
+                if new != live_outs[i] {
+                    changed = true;
+                    live_outs[i] = new;
+                }
+
+                let old = std::mem::take(&mut live_ins[i]);
+                let mut new = old.clone();
+                new.extend(live_outs[i].clone().intersection(&defs[i]));
+                if new != old {
+                    changed = true;
+                }
+                live_ins[i] = new;
+            }
+        }
+
+        live_outs
     }
 }

@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+pub mod backend;
 pub mod ir;
 pub mod parser;
 pub mod ssa;
@@ -182,7 +183,8 @@ mod tests {
         assert_eq!(cfg.get_block(6).children, vec![7]);
         assert_eq!(cfg.get_block(6).idom.unwrap(), 1);
         assert_eq!(cfg.get_block(7).children, vec![]);
-        assert_eq!(cfg.get_block(7).idom.unwrap(), 6)
+        assert_eq!(cfg.get_block(7).idom.unwrap(), 6);
+        cfg.to_ssa();
     }
 
     #[test]
