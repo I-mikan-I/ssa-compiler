@@ -12,13 +12,15 @@ The compiler will host an optimization pipeline and native machine code generati
     - [x] Translation from AST (DONE)
     - [x] CFG construction (DONE)
     - [x] SSA transformation (DONE)
-- [ ] Optimization passes (WIP)
+- [x] Optimization passes (DONE)
     - [x] GVN-PRE (DONE)
-    - [x] Copy Propagation (DONE)
-- [ ] Backend
+    - [x] Copy propagation (DONE)
+- [ ] Backend (WIP)
+    - [ ] Register allocation (WIP)
 
 ## Cargo features
 
 | Feature | Description |
 | --- | --- |
 | `print-cfgs` | Displays every constructed CFG as a [dot](https://graphviz.org/doc/info/lang.html) graph. |
+| `print-gvn` | Displays debug information of the GVN-PRE pass. |
