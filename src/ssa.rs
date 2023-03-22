@@ -218,7 +218,7 @@ pub mod gvn_pre {
                     }
                     //unsupported; kill sets
                     Operator::Load(x, _, _)
-                    | Operator::Store(x, _, _)
+                    | Operator::LoadLocal(x, _)
                     | Operator::La(x, _)
                     | Operator::Slt(x, _, _)
                     | Operator::Call(x, _, _)
@@ -674,7 +674,7 @@ pub mod gvn_pre {
                             | Operator::Mv(x, _)
                             | Operator::Xor(x, _, _)
                             | Operator::Load(x, _, _)
-                            | Operator::Store(x, _, _)
+                            | Operator::LoadLocal(x, _)
                             | Operator::La(x, _)
                             | Operator::Li(x, _)
                             | Operator::Slt(x, _, _)
@@ -1629,7 +1629,9 @@ pub mod liveness {
                         | crate::ir::Operator::Load(_, y, z)
                         | crate::ir::Operator::And(_, y, z) => insert_deps!(y, z),
                         crate::ir::Operator::Store(x, y, z) => insert_deps!(x, y, z),
-                        crate::ir::Operator::Mv(_, y) => insert_deps!(y),
+                        crate::ir::Operator::StoreLocal(y, _) | crate::ir::Operator::Mv(_, y) => {
+                            insert_deps!(y)
+                        }
                         crate::ir::Operator::Bl(x, y, ..)
                         | crate::ir::Operator::Beq(x, y, ..)
                         | crate::ir::Operator::Bgt(x, y, ..) => insert_deps!(x, y),

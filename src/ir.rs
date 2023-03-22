@@ -146,6 +146,8 @@ pub enum Operator {
     Label(Rc<str>),
     /// Loads param 2nd into fst
     GetParameter(VReg, u64),
+    StoreLocal(VReg, u64),
+    LoadLocal(VReg, u64),
     Nop,
 }
 impl Operator {
@@ -165,7 +167,7 @@ impl Operator {
             | Operator::Or(_, y, z) => {
                 vec![*y, *z]
             }
-            Operator::Mv(_, y) => {
+            Operator::StoreLocal(y, _) | Operator::Mv(_, y) => {
                 vec![*y]
             }
             Operator::Store(x, y, z) => {
@@ -173,6 +175,33 @@ impl Operator {
             }
             Operator::Call(_, _, z) => z.clone(),
             Operator::Return(x) => vec![*x],
+            _ => vec![],
+        }
+    }
+    pub fn dependencies_mut(&mut self) -> Vec<&mut VReg> {
+        match self {
+            Operator::Add(_, y, z)
+            | Operator::Sub(_, y, z)
+            | Operator::Mult(_, y, z)
+            | Operator::Div(_, y, z)
+            | Operator::Bl(z, y, _, _)
+            | Operator::Slt(_, y, z)
+            | Operator::Bgt(z, y, _, _)
+            | Operator::Load(_, y, z)
+            | Operator::Beq(z, y, _, _)
+            | Operator::And(_, y, z)
+            | Operator::Xor(_, y, z)
+            | Operator::Or(_, y, z) => {
+                vec![y, z]
+            }
+            Operator::StoreLocal(y, _) | Operator::Mv(_, y) => {
+                vec![y]
+            }
+            Operator::Store(x, y, z) => {
+                vec![x, y, z]
+            }
+            Operator::Call(_, _, z) => z.iter_mut().collect(),
+            Operator::Return(x) => vec![x],
             _ => vec![],
         }
     }
@@ -191,7 +220,28 @@ impl Operator {
             | Operator::Li(x, _)
             | Operator::Slt(x, _, _)
             | Operator::Call(x, _, _)
+            | Operator::LoadLocal(x, _)
             | Operator::GetParameter(x, _) => Some(*x),
+            _ => None,
+        }
+    }
+    pub fn receiver_mut(&mut self) -> Option<&mut VReg> {
+        match self {
+            Operator::Add(x, _, _)
+            | Operator::Sub(x, _, _)
+            | Operator::Mult(x, _, _)
+            | Operator::Div(x, _, _)
+            | Operator::And(x, _, _)
+            | Operator::Or(x, _, _)
+            | Operator::Mv(x, _)
+            | Operator::Xor(x, _, _)
+            | Operator::Load(x, _, _)
+            | Operator::La(x, _)
+            | Operator::Li(x, _)
+            | Operator::Slt(x, _, _)
+            | Operator::Call(x, _, _)
+            | Operator::LoadLocal(x, _)
+            | Operator::GetParameter(x, _) => Some(x),
             _ => None,
         }
     }
@@ -220,7 +270,7 @@ impl Operator {
             | Operator::Bl(z, y, _, _)
             | Operator::Beq(z, y, _, _)
             | Operator::Load(_, y, z) => replace!(y, z),
-            Operator::Return(y) | Operator::Mv(_, y) => replace!(y),
+            Operator::StoreLocal(y, _) | Operator::Return(y) | Operator::Mv(_, y) => replace!(y),
             Operator::Store(x, y, z) => replace!(x, y, z),
             Operator::Call(.., z) => {
                 for r in z {
@@ -278,6 +328,8 @@ impl Display for Operator {
                 write!(f, ")")
             }
             Operator::Return(rd1) => write!(f, "\treturn rd{rd1}"),
+            Operator::LoadLocal(rd1, imm) => write!(f, "\tloadAR rd{rd1}, #{imm}"),
+            Operator::StoreLocal(rd1, imm) => write!(f, "\tstoreAR rd{rd1}, #{imm}"),
             Operator::Label(rd1) => write!(f, "@{rd1}:"),
             Operator::GetParameter(rd1, rd2) => write!(f, "\tgetParam rd{rd1}, {rd2}"),
             Operator::Nop => write!(f, "nop"),
@@ -700,14 +752,19 @@ pub struct CFG<O> {
     entry: usize,
     exit: usize,
     max_reg: VReg,
+    allocated_ars: u64,
 }
 impl<O> CFG<O> {
+    pub fn get_allocated_ars_mut(&mut self) -> &mut u64 {
+        &mut self.allocated_ars
+    }
     pub fn into_other<A>(self, blocks: Vec<Block<A>>) -> CFG<A> {
         CFG {
             blocks,
             entry: self.entry,
             exit: self.exit,
             max_reg: self.max_reg,
+            allocated_ars: 0,
         }
     }
     pub fn get_blocks(&self) -> &[Block<O>] {
@@ -1033,6 +1090,7 @@ impl CFG<Operator> {
             entry: 0,
             exit,
             max_reg,
+            allocated_ars: 0,
         };
         result.split_critical();
         let idoms = result.calculate_idoms(false);
@@ -1164,7 +1222,10 @@ impl CFG<Operator> {
                     update_name!(z);
                     set_name!(x);
                 }
-                Operator::Li(x, _) | Operator::La(x, _) | Operator::GetParameter(x, _) => {
+                Operator::LoadLocal(x, _)
+                | Operator::Li(x, _)
+                | Operator::La(x, _)
+                | Operator::GetParameter(x, _) => {
                     set_name!(x);
                 }
                 Operator::Mv(x, y) => {
@@ -1183,7 +1244,7 @@ impl CFG<Operator> {
                     }
                     set_name!(x);
                 }
-                Operator::Return(x) => {
+                Operator::StoreLocal(x, _) | Operator::Return(x) => {
                     update_name!(x);
                 }
                 _ => {}
@@ -1250,6 +1311,7 @@ impl CFG<Operator> {
             entry: self.entry,
             exit: self.exit,
             max_reg: generator.next_reg(),
+            allocated_ars: 0,
         };
         let _ = result;
         #[cfg(feature = "print-cfgs")]
@@ -1290,7 +1352,10 @@ impl CFG<Operator> {
                         killed.insert(x);
                         defined_in.entry(*x).or_default().insert(i);
                     }
-                    Operator::GetParameter(x, ..) | Operator::La(x, ..) | Operator::Li(x, ..) => {
+                    Operator::LoadLocal(x, _)
+                    | Operator::GetParameter(x, ..)
+                    | Operator::La(x, ..)
+                    | Operator::Li(x, ..) => {
                         killed.insert(x);
                         defined_in.entry(*x).or_default().insert(i);
                     }
@@ -1312,7 +1377,7 @@ impl CFG<Operator> {
                         test_and_insert!(y);
                         test_and_insert!(z);
                     }
-                    Operator::Return(y) => {
+                    Operator::StoreLocal(y, _) | Operator::Return(y) => {
                         test_and_insert!(y);
                     }
                     _ => {}
@@ -1347,6 +1412,7 @@ impl CFG<SSAOperator> {
                         Operator::Div(_, x, y) => push_operands!(x, y),
                         Operator::And(_, x, y) => push_operands!(x, y),
                         Operator::Or(_, x, y) => push_operands!(x, y),
+                        Operator::StoreLocal(x, _) => push_operands!(x),
                         Operator::Mv(_, x) => push_operands!(x),
                         Operator::Xor(_, x, y) => push_operands!(x, y),
                         Operator::Load(_, x, y) => push_operands!(x, y),
@@ -1527,6 +1593,7 @@ mod test {
                             Operator::Load(x, _, _)  |
                             Operator::Store(x, _, _)  |
                             Operator::La(x, _)  |
+                            Operator::LoadLocal(x, _) |
                             Operator::Li(x, _)  |
                             Operator::Slt(x, _, _)  |
                             Operator::Call(x, _, _)  |
@@ -1579,7 +1646,7 @@ mod test {
                                 check_def!(z);
                                 create_def!(x);
                             }
-                            Operator::Li(x, _) | Operator::La(x, _) | Operator::GetParameter(x, _) => {
+                            Operator::LoadLocal(x, _) | Operator::Li(x, _) | Operator::La(x, _) | Operator::GetParameter(x, _) => {
                                 create_def!(x);
                             }
                             Operator::Mv(x, y) => {
@@ -1598,7 +1665,7 @@ mod test {
                                 }
                                 create_def!(x);
                             }
-                            Operator::Return(x) => {
+                            Operator::StoreLocal(x, _) | Operator::Return(x) => {
                                 check_def!(x);
                             }
                             _ => {}
