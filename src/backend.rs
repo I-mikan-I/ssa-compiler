@@ -5,17 +5,104 @@ pub mod register_allocation {
     use crate::util;
 
     pub trait Allocator<NR> {
-        fn allocate(ssa: CFG<SSAOperator>) -> HashMap<VReg, NR>;
+        fn allocate(ssa: CFG<SSAOperator>) -> (CFG<Operator>, HashMap<VReg, NR>);
     }
 
     pub struct RISCV64 {}
-    pub enum RV64Reg {
-        PLACEHOLDER,
-    }
 
+    #[repr(u64)]
+    #[derive(Debug)]
+    pub enum RV64Reg {
+        X0 = 0,   // zero
+        X1 = 1,   // ra
+        X2 = 2,   // sp
+        X3 = 3,   // gp
+        X4 = 4,   // tp
+        X5 = 5,   // t0
+        X6 = 6,   // t1
+        X7 = 7,   // t2
+        X8 = 8,   // s0
+        X9 = 9,   // s1
+        X10 = 10, // a0
+        X11 = 11,
+        X12 = 12,
+        X13 = 13,
+        X14 = 14,
+        X15 = 15,
+        X16 = 16,
+        X17 = 17, // a7
+        X18 = 18, // s2
+        X19 = 19,
+        X20 = 20,
+        X21 = 21,
+        X22 = 22,
+        X23 = 23,
+        X24 = 24,
+        X25 = 25,
+        X26 = 26,
+        X27 = 27, // s11
+        X28 = 28, // t3
+        X29 = 29,
+        X30 = 30,
+        X31 = 31, // t6
+    }
     impl RV64Reg {
         fn get_param_reg(n: u64) -> Option<RV64Reg> {
-            Some(Self::PLACEHOLDER)
+            use RV64Reg::*;
+            match n {
+                0 => Some(X10),
+                1 => Some(X11),
+                2 => Some(X12),
+                3 => Some(X13),
+                4 => Some(X14),
+                5 => Some(X15),
+                6 => Some(X16),
+                7 => Some(X17),
+                _ => None,
+            }
+        }
+    }
+
+    impl std::convert::TryFrom<u64> for RV64Reg {
+        type Error = &'static str;
+
+        fn try_from(value: u64) -> Result<Self, Self::Error> {
+            use RV64Reg::*;
+            match value {
+                0 => Ok(X0),
+                1 => Ok(X1),
+                2 => Ok(X2),
+                3 => Ok(X3),
+                4 => Ok(X4),
+                5 => Ok(X5),
+                6 => Ok(X6),
+                7 => Ok(X7),
+                8 => Ok(X8),
+                9 => Ok(X9),
+                10 => Ok(X10),
+                11 => Ok(X11),
+                12 => Ok(X12),
+                13 => Ok(X13),
+                14 => Ok(X14),
+                15 => Ok(X15),
+                16 => Ok(X16),
+                17 => Ok(X17),
+                18 => Ok(X18),
+                19 => Ok(X19),
+                20 => Ok(X20),
+                21 => Ok(X21),
+                22 => Ok(X22),
+                23 => Ok(X23),
+                24 => Ok(X24),
+                25 => Ok(X25),
+                26 => Ok(X26),
+                27 => Ok(X27),
+                28 => Ok(X28),
+                29 => Ok(X29),
+                30 => Ok(X30),
+                31 => Ok(X31),
+                _ => Err("register number too high"),
+            }
         }
     }
 
@@ -111,7 +198,7 @@ strict graph G {{
         fn find_coloring(
             &self,
             max_colors: usize,
-            pins: HashMap<VReg, u64>,
+            pins: &HashMap<VReg, u64>,
         ) -> Result<Vec<u64>, ()> {
             use z3::ast::*;
             let mut config = z3::Config::new();
@@ -222,6 +309,7 @@ strict graph G {{
                 })
                 .collect();
         }
+        cfg.set_max_reg(gen.next_reg());
     }
 
     impl RISCV64 {
@@ -267,6 +355,64 @@ strict graph G {{
                 }
             }
             res
+        }
+        /// no critical edges allowed
+        fn conventionalize_ssa(ssa: &mut CFG<SSAOperator>) {
+            let mut parallel_copies = vec![Vec::new(); ssa.len()];
+            let mut gen = VRegGenerator::starting_at_reg(ssa.get_max_reg());
+            for block in ssa.get_blocks_mut().iter_mut() {
+                let mut ops = block.body.iter_mut();
+                while let Some(SSAOperator::Phi(_, vec)) = ops.next() {
+                    let new_args = std::iter::repeat_with(|| gen.next_reg())
+                        .take(vec.len())
+                        .collect::<Vec<_>>();
+                    for (i, pred) in block.preds.iter().enumerate() {
+                        parallel_copies[*pred].push(Operator::Mv(new_args[i], vec[i]));
+                    }
+                    *vec = new_args;
+                }
+            }
+
+            for (i, mut copies) in parallel_copies.into_iter().enumerate() {
+                let len = ssa.get_block(i).body.len();
+                // found copy to non-live name
+                while !copies.is_empty() {
+                    if let Some(op) = {
+                        let mut choices = HashMap::new();
+                        let mut iter = copies.iter().enumerate();
+                        while let Some((i, Operator::Mv(rec, _))) = iter.next() {
+                            choices.insert(rec, i);
+                        }
+                        let mut iter = copies.iter();
+                        while let Some(Operator::Mv(_, op)) = iter.next() {
+                            choices.remove(&op);
+                        }
+                        if let Some(index) = choices.values().next() {
+                            Some(copies.remove(*index))
+                        } else {
+                            None
+                        }
+                    } {
+                        ssa.get_block_mut(i)
+                            .body
+                            .insert(len - 1, SSAOperator::IROp(op.clone()));
+                    } else {
+                        // break cycle
+                        if let Some(Operator::Mv(_, op)) = copies.last_mut() {
+                            let new_name = gen.next_reg();
+                            ssa.get_block_mut(i)
+                                .body
+                                .insert(len - 1, SSAOperator::IROp(Operator::Mv(new_name, *op)));
+                            *op = new_name;
+                        }
+                    }
+                }
+            }
+            #[cfg(feature = "print-cfgs")]
+            {
+                println!("after conventionalizing SSA:{}\n", ssa.to_dot());
+            }
+            ssa.set_max_reg(gen.next_reg());
         }
         fn rewrite_liveranges(
             mut ssa: CFG<SSAOperator>,
@@ -368,22 +514,61 @@ strict graph G {{
     }
 
     impl Allocator<RV64Reg> for RISCV64 {
-        fn allocate(ssa: CFG<SSAOperator>) -> HashMap<VReg, RV64Reg> {
+        fn allocate(ssa: CFG<SSAOperator>) -> (CFG<Operator>, HashMap<VReg, RV64Reg>) {
             let mut live_out = crate::ssa::liveness::live_out(&ssa);
             let mut lr_cfg = RISCV64::rewrite_liveranges(ssa, &mut live_out);
-            let pins: Vec<_> = RISCV64::pin_liveranges(&mut lr_cfg, &mut live_out)
+            let pins: HashMap<_, _> = RISCV64::pin_liveranges(&mut lr_cfg, &mut live_out)
                 .into_iter()
                 .map(|(lr, reg)| (lr, reg as u64))
                 .collect();
 
-            todo!()
+            let (graph, coloring) = loop {
+                let graph = RISCV64::build_interference_graph(&lr_cfg, &live_out);
+
+                match graph.find_coloring(32, &pins) {
+                    Err(_) => {
+                        let lr_to_spill = graph
+                            .nodes
+                            .iter()
+                            .max_by_key(|node| node.edge_with.len())
+                            .unwrap()
+                            .live_range;
+                        let ar = *lr_cfg.get_allocated_ars_mut();
+                        spill_liverange(&mut lr_cfg, &mut live_out, lr_to_spill, ar);
+                        *lr_cfg.get_allocated_ars_mut() += 1;
+                    }
+                    Ok(coloring) => break (graph, coloring),
+                }
+            };
+
+            for block in lr_cfg.get_blocks_mut() {
+                for op in block.body.iter_mut() {
+                    if let Some(rec) = op.receiver_mut() {
+                        *rec = coloring[graph.index[rec]] as u32;
+                    }
+                    for dep in op.dependencies_mut() {
+                        *dep = coloring[graph.index[dep]] as u32;
+                    }
+                }
+            }
+            (
+                lr_cfg,
+                coloring
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, color)| (graph.nodes[i].live_range, color.try_into().unwrap()))
+                    .collect(),
+            )
         }
     }
     #[cfg(test)]
     mod tests {
         use std::collections::HashMap;
 
-        use crate::ir::CFG;
+        use crate::{
+            backend::register_allocation::{Allocator, RISCV64},
+            ir::CFG,
+        };
 
         #[test]
         fn construct_graph() {
@@ -501,12 +686,54 @@ strict graph G {{
                 );
             }
 
-            let coloring = graph.find_coloring(4, HashMap::default());
+            let coloring = graph.find_coloring(4, &HashMap::default());
             assert!(coloring.is_ok());
             println!(
                 "found coloring:\n{}",
                 graph.to_dot_colored(Some(coloring.unwrap()))
             );
+        }
+        #[test]
+        fn allocate_program() {
+            let input = "
+        myvar3 :: Bool = false;
+        lambda myfun(myvar3 :: Int) :: Int {
+            myvar4 :: Int = 0;
+            i :: Int = 100;
+            while (i >= 0) do {
+                if i / 2 / 2 / 2 < 2 then {
+                    myvar4 = myvar4 * 3;
+                } else {
+                    myvar4 = myvar4 / 2;
+                }
+                i = i - 1;
+            }
+           return myvar4;
+        }
+        myvar2 :: Bool = true;
+        ";
+            let result = crate::parser::parse(&input);
+            assert!(result.1.is_empty());
+            assert!(result.0.is_some());
+            assert!(result.0.as_ref().unwrap().is_ok());
+            let p = result.0.unwrap().unwrap();
+            let res = crate::parser::validate(&p);
+            assert!(res.is_none(), "{}", res.unwrap());
+
+            let mut context = crate::ir::Context::new();
+            crate::ir::translate_program(&mut context, &p);
+            let funs = context.get_functions();
+            let fun = funs.get("myfun").unwrap();
+            let body = fun.get_body();
+
+            let cfg = CFG::from_linear(body, fun.get_params(), fun.get_max_reg());
+            let mut ssa = cfg.to_ssa();
+            crate::ssa::optimization_sequence(&mut ssa).unwrap();
+            RISCV64::conventionalize_ssa(&mut ssa);
+
+            let allocation = super::RISCV64::allocate(ssa);
+            println!("allocation: {:?}", allocation.1);
+            println!("allocated_graph: {}", allocation.0.to_dot());
         }
     }
 }
