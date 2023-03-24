@@ -646,6 +646,10 @@ pub mod gvn_pre {
 
     fn eliminate(cfg: &mut CFG<SSAOperator>, leaders: &LeaderSet, value_table: &mut ValueTable) {
         for (i, block) in cfg.get_blocks_mut().iter_mut().enumerate() {
+            let mut leaders_in = block
+                .idom
+                .map(|idom| leaders[idom].clone())
+                .unwrap_or_else(|| HashMap::new());
             let mut body_old = vec![];
             std::mem::swap(&mut body_old, &mut block.body);
             block.body = body_old
@@ -654,7 +658,7 @@ pub mod gvn_pre {
                     macro_rules! swap_op {
                         ($reg:expr, $op:expr) => {{
                             if let Some(&leader) =
-                                leaders[i].get(&value_table.maybe_insert(Expression::Reg($reg)))
+                                leaders_in.get(&value_table.maybe_insert(Expression::Reg($reg)))
                             {
                                 if leader != $reg {
                                     return Some(SSAOperator::IROp(Operator::Mv($reg, leader)));
@@ -663,7 +667,8 @@ pub mod gvn_pre {
                             Some(SSAOperator::IROp($op))
                         }};
                     }
-                    match op {
+                    let rec = op.receiver();
+                    let res = match op {
                         SSAOperator::IROp(op) => match op {
                             Operator::Add(x, ..)
                             | Operator::Sub(x, _, _)
@@ -692,7 +697,12 @@ pub mod gvn_pre {
                             }
                             Some(op)
                         }
+                    };
+                    if let Some(rec) = rec {
+                        let val = value_table.maybe_insert(Expression::Reg(rec));
+                        leaders_in.entry(val).or_insert(rec);
                     }
+                    res
                 })
                 .collect();
         }
@@ -1286,6 +1296,49 @@ pub mod gvn_pre {
             eliminate(&mut ssa, &leaders, &mut table);
             println!("After eliminate: \n {}", ssa.to_dot());
         }
+        #[test]
+        fn insert_call() {
+            let l1: Rc<str> = "Label1".into();
+            let l2: Rc<str> = "Label2".into();
+            let l3: Rc<str> = "Label3".into();
+            let l4: Rc<str> = "Label4".into();
+            let body = vec![
+                Operator::Li(1, 3),
+                Operator::J(Rc::clone(&l4)),
+                Operator::Label(Rc::clone(&l4)),
+                Operator::Li(2, 5),
+                Operator::Add(3, 1, 2),
+                Operator::Beq(1, 2, Rc::clone(&l1), Rc::clone(&l2)),
+                Operator::Label(Rc::clone(&l1)),
+                Operator::Call(3, Rc::from("myfun"), vec![2, 1]),
+                Operator::Sub(4, 3, 2),
+                Operator::Xor(3, 4, 3),
+                Operator::J(Rc::clone(&l3)),
+                Operator::Label(Rc::clone(&l2)),
+                Operator::Sub(4, 3, 2),
+                Operator::And(3, 4, 3),
+                Operator::Sub(7, 3, 1),
+                Operator::J(Rc::clone(&l3)),
+                Operator::Label(Rc::clone(&l3)),
+                Operator::Sub(6, 3, 1),
+                Operator::J(Rc::clone(&l4)),
+            ];
+            println!("{}", crate::ir::Displayable(&body[..]));
+
+            let cfg = CFG::from_linear(body, vec![], 8);
+            let mut ssa = cfg.to_ssa();
+            let (mut leaders, antic_in, phi_gen, mut table) = build_sets(&mut ssa);
+            println!("Before insert: \n {}", ssa.to_dot());
+            insert(&mut ssa, &mut leaders, &antic_in, &phi_gen, &mut table);
+            println!("After insert: \n {}", ssa.to_dot());
+            eliminate(&mut ssa, &leaders, &mut table);
+            println!("After eliminate: \n {}", ssa.to_dot());
+            assert!(ssa
+                .get_block(2)
+                .body
+                .iter()
+                .any(|op| matches!(op, SSAOperator::IROp(Operator::Call(..)))));
+        }
     }
 }
 
@@ -1547,7 +1600,7 @@ pub mod copy_propagation {
         use std::rc::Rc;
 
         use crate::{
-            ir::{Operator, CFG},
+            ir::{Operator, SSAOperator, CFG},
             ssa::{copy_propagation::build_set, gvn_pre},
         };
 
@@ -1589,5 +1642,99 @@ pub mod copy_propagation {
             super::optimize(&mut ssa);
             println!("After copy propagation: \n{}", ssa.to_dot());
         }
+        #[test]
+        fn sample_call() {
+            let l1: Rc<str> = "Label1".into();
+            let l2: Rc<str> = "Label2".into();
+            let l3: Rc<str> = "Label3".into();
+            let l4: Rc<str> = "Label4".into();
+            let body = vec![
+                Operator::Li(1, 3),
+                Operator::J(Rc::clone(&l4)),
+                Operator::Label(Rc::clone(&l4)),
+                Operator::Li(2, 5),
+                Operator::Add(3, 1, 2),
+                Operator::Beq(1, 2, Rc::clone(&l1), Rc::clone(&l2)),
+                Operator::Label(Rc::clone(&l1)),
+                Operator::Call(3, Rc::from("myfun"), vec![2, 1]),
+                Operator::Sub(4, 3, 2),
+                Operator::Xor(3, 4, 3),
+                Operator::J(Rc::clone(&l3)),
+                Operator::Label(Rc::clone(&l2)),
+                Operator::Sub(4, 3, 2),
+                Operator::And(3, 4, 3),
+                Operator::Sub(7, 3, 1),
+                Operator::J(Rc::clone(&l3)),
+                Operator::Label(Rc::clone(&l3)),
+                Operator::Sub(6, 3, 1),
+                Operator::J(Rc::clone(&l4)),
+            ];
+            println!("{}", crate::ir::Displayable(&body[..]));
+
+            let cfg = CFG::from_linear(body, vec![], 8);
+            let mut ssa = cfg.to_ssa();
+            println!("Before GVN-PRE: \n{}", ssa.to_dot());
+            gvn_pre::optimize(&mut ssa);
+            println!("After GVN-PRE: \n{}", ssa.to_dot());
+            let lattice = build_set(&ssa);
+            println!("Copy Propagation Lattice: \n{:?}", lattice);
+            super::optimize(&mut ssa);
+            println!("After copy propagation: \n{}", ssa.to_dot());
+            assert!(ssa
+                .get_block(2)
+                .body
+                .iter()
+                .any(|op| matches!(op, SSAOperator::IROp(Operator::Call(..)))))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::ir::{Operator, SSAOperator, CFG};
+
+    #[test]
+    fn optimize_with_call() {
+        let input = "
+        myvar3 :: Bool = false;
+        lambda myfun(myvar3 :: Int) :: Int {
+            myvar4 :: Int = 0;
+            i :: Int = 100;
+            while (i >= 0) do {
+                myvar4 = myfun(myvar4);
+                i = i - 1;
+            }
+           return myvar4;
+        }
+        myvar2 :: Bool = true;
+        ";
+        let result = crate::parser::parse(&input);
+        assert!(result.1.is_empty());
+        assert!(result.0.is_some());
+        assert!(result.0.as_ref().unwrap().is_ok());
+        let p = result.0.unwrap().unwrap();
+        let res = crate::parser::validate(&p);
+        assert!(res.is_none(), "{}", res.unwrap());
+
+        let mut context = crate::ir::Context::new();
+        crate::ir::translate_program(&mut context, &p);
+        let funs = context.get_functions();
+        let fun = funs.get("myfun").unwrap();
+        let body = fun.get_body();
+
+        let cfg = CFG::from_linear(body, fun.get_params(), fun.get_max_reg());
+        let mut ssa = cfg.to_ssa();
+        super::gvn_pre::optimize(&mut ssa);
+        assert!(ssa
+            .get_blocks()
+            .iter()
+            .flat_map(|block| block.body.iter())
+            .any(|op| matches!(op, SSAOperator::IROp(Operator::Call(..)))));
+        super::copy_propagation::optimize(&mut ssa);
+        assert!(ssa
+            .get_blocks()
+            .iter()
+            .flat_map(|block| block.body.iter())
+            .any(|op| matches!(op, SSAOperator::IROp(Operator::Call(..)))));
     }
 }

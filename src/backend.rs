@@ -124,10 +124,10 @@ pub mod register_allocation {
         }
         fn merge(&mut self, into: VReg, from: VReg) {
             if !self.index.contains_key(&into) {
-                self.insert(into);
+                self.maybe_insert(into);
             }
             if !self.index.contains_key(&from) {
-                self.insert(from);
+                self.maybe_insert(from);
             }
             let into_node = self.index[&into];
             let from_node = self.index[&from];
@@ -143,7 +143,7 @@ pub mod register_allocation {
             self.nodes[into_node].edge_with.dedup();
             self.index.remove(&from); // garbage left
         }
-        fn insert(&mut self, vreg: VReg) -> Option<&InterferenceNode> {
+        fn maybe_insert(&mut self, vreg: VReg) -> Option<&InterferenceNode> {
             if let Some(&index) = self.index.get(&vreg) {
                 return Some(&self.nodes[index]);
             }
@@ -173,10 +173,10 @@ pub mod register_allocation {
         }
         fn add_edge(&mut self, vreg1: VReg, vreg2: VReg) {
             if !self.index.contains_key(&vreg1) {
-                self.insert(vreg1);
+                self.maybe_insert(vreg1);
             }
             if !self.index.contains_key(&vreg2) {
-                self.insert(vreg2);
+                self.maybe_insert(vreg2);
             }
             let (&index1, &index2) = (
                 self.index.get(&vreg1).unwrap(),
@@ -267,7 +267,7 @@ strict graph G {{
 
             let max = Int::from_u64(&context, max_colors as u64);
             let min = Int::from_u64(&context, 0);
-            for node in &nodes_z3 {
+            for node in nodes_z3.iter().chain(nodes_native_regs.iter()) {
                 solver.assert(&node.lt(&max));
                 solver.assert(&node.ge(&min));
             }
@@ -291,9 +291,15 @@ strict graph G {{
             }
             let model = solver.get_model().unwrap();
 
+            let color_to_reg = nodes_native_regs
+                .into_iter()
+                .enumerate()
+                .map(|(i, v)| (model.eval(&v, true).unwrap().as_u64().unwrap(), i as u64))
+                .collect::<HashMap<_, _>>();
+
             Ok(nodes_z3
                 .into_iter()
-                .map(|node| model.eval(&node, true).unwrap().as_u64().unwrap())
+                .map(|node| color_to_reg[&model.eval(&node, true).unwrap().as_u64().unwrap()])
                 .collect())
         }
     }
@@ -574,6 +580,9 @@ strict graph G {{
                     .into_iter()
                     .map(|(lr, reg)| (lr, reg as u64))
                     .collect();
+                for lr in pins.keys() {
+                    graph.maybe_insert(*lr);
+                }
                 match graph.find_coloring(N, &pins) {
                     Err(_) => {
                         let lr_to_spill = graph
@@ -614,10 +623,7 @@ strict graph G {{
     mod tests {
         use std::collections::HashMap;
 
-        use crate::{
-            backend::register_allocation::{Allocator, RISCV64},
-            ir::CFG,
-        };
+        use crate::{backend::register_allocation::Allocator, ir::CFG};
 
         #[test]
         fn construct_graph() {
@@ -684,6 +690,44 @@ strict graph G {{
                 } else {
                     myvar4 = myvar4 / 2;
                 }
+                i = i - 1;
+            }
+           return myvar4;
+        }
+        myvar2 :: Bool = true;
+        ";
+            let result = crate::parser::parse(&input);
+            assert!(result.1.is_empty());
+            assert!(result.0.is_some());
+            assert!(result.0.as_ref().unwrap().is_ok());
+            let p = result.0.unwrap().unwrap();
+            let res = crate::parser::validate(&p);
+            assert!(res.is_none(), "{}", res.unwrap());
+
+            let mut context = crate::ir::Context::new();
+            crate::ir::translate_program(&mut context, &p);
+            let funs = context.get_functions();
+            let fun = funs.get("myfun").unwrap();
+            let body = fun.get_body();
+
+            let cfg = CFG::from_linear(body, fun.get_params(), fun.get_max_reg());
+            let mut ssa = cfg.to_ssa();
+            crate::ssa::optimization_sequence(&mut ssa).unwrap();
+            super::conventionalize_ssa(&mut ssa);
+
+            let allocation = super::RISCV64::<32>::allocate(ssa);
+            println!("allocation: {:?}", allocation.1);
+            println!("allocated_graph: {}", allocation.0.to_dot());
+        }
+        #[test]
+        fn allocate_program_calls() {
+            let input = "
+        myvar3 :: Bool = false;
+        lambda myfun(myvar3 :: Int) :: Int {
+            myvar4 :: Int = 0;
+            i :: Int = 100;
+            while (i >= 0) do {
+                myvar4 = myfun(myvar4);
                 i = i - 1;
             }
            return myvar4;
