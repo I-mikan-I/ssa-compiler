@@ -241,7 +241,6 @@ strict graph G {{
                 .collect::<Vec<_>>();
 
             let nodes_native_regs: Vec<_> = (0..max_colors)
-                .into_iter()
                 .map(|num| Int::new_const(&context, format!("REG_{num}")))
                 .collect();
 
@@ -267,7 +266,7 @@ strict graph G {{
             }
 
             let max = Int::from_u64(&context, max_colors as u64);
-            let min = Int::from_u64(&context, 0 as u64);
+            let min = Int::from_u64(&context, 0);
             for node in &nodes_z3 {
                 solver.assert(&node.lt(&max));
                 solver.assert(&node.ge(&min));
@@ -302,7 +301,7 @@ strict graph G {{
     //todo could be made more efficient
     fn spill_liverange(cfg: &mut CFG<Operator>, live_range: VReg, ar_offset: u64) {
         let mut gen = VRegGenerator::starting_at_reg(cfg.get_max_reg());
-        for block in cfg.get_blocks_mut().into_iter() {
+        for block in cfg.get_blocks_mut().iter_mut() {
             block.body = std::mem::take(&mut block.body)
                 .into_iter()
                 .flat_map(|mut op| {
@@ -406,11 +405,11 @@ strict graph G {{
                         while let Some(Operator::Mv(_, op)) = iter.next() {
                             choices.remove(&op);
                         }
-                        if let Some(index) = choices.values().next() {
-                            Some(copies.remove(*index))
-                        } else {
-                            None
-                        }
+                        choices
+                            .values()
+                            .next()
+                            .cloned()
+                            .map(|index| copies.remove(index))
                     } {
                         ssa.get_block_mut(i)
                             .body
