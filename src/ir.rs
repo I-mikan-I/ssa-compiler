@@ -328,8 +328,8 @@ impl Display for Operator {
                 write!(f, ")")
             }
             Operator::Return(rd1) => write!(f, "\treturn rd{rd1}"),
-            Operator::LoadLocal(rd1, imm) => write!(f, "\tloadAR rd{rd1}, #{imm}"),
-            Operator::StoreLocal(rd1, imm) => write!(f, "\tstoreAR rd{rd1}, #{imm}"),
+            Operator::LoadLocal(rd1, imm) => write!(f, "\tloadAR rd{rd1}, AR({imm})"),
+            Operator::StoreLocal(rd1, imm) => write!(f, "\tstoreAR rd{rd1}, AR({imm})"),
             Operator::Label(rd1) => write!(f, "@{rd1}:"),
             Operator::GetParameter(rd1, rd2) => write!(f, "\tgetParam rd{rd1}, {rd2}"),
             Operator::Nop => write!(f, "nop"),

@@ -8,7 +8,7 @@ pub mod register_allocation {
         fn allocate(ssa: CFG<SSAOperator>) -> (CFG<Operator>, HashMap<u64, NR>);
     }
 
-    pub struct RISCV64 {}
+    pub struct RISCV64<const N: usize = 32> {}
 
     #[repr(u64)]
     #[derive(Debug)]
@@ -332,7 +332,158 @@ strict graph G {{
         }
         cfg.set_max_reg(gen.next_reg());
     }
+    fn build_interference_graph(cfg: &CFG<Operator>) -> (InterferenceGraph, HashSet<(VReg, VReg)>) {
+        let mut graph = InterferenceGraph::new();
+        let mut coalescable = HashSet::new();
+        let live_out = cfg.live_out();
+        for (i, block) in cfg.get_blocks().iter().enumerate() {
+            let mut live_now = live_out[i].clone();
+            for op in block.body.iter().rev() {
+                if let Some(rec) = op.receiver() {
+                    live_now.remove(&rec);
+                    if let Operator::Mv(lr1, lr2) = op {
+                        coalescable.insert((*lr1, *lr2));
+                        live_now
+                            .iter()
+                            .filter(|&lr| lr != lr2)
+                            .for_each(|&lr| graph.add_edge(lr, rec));
+                    } else {
+                        live_now.iter().for_each(|&lr| graph.add_edge(lr, rec));
+                    }
+                }
+                live_now.extend(op.dependencies());
+            }
+        }
+        (graph, coalescable)
+    }
+    /// no critical edges allowed
+    fn conventionalize_ssa(ssa: &mut CFG<SSAOperator>) {
+        let mut parallel_copies = vec![Vec::new(); ssa.len()];
+        let mut gen = VRegGenerator::starting_at_reg(ssa.get_max_reg());
+        for block in ssa.get_blocks_mut().iter_mut() {
+            let mut ops = block.body.iter_mut();
+            while let Some(SSAOperator::Phi(_, vec)) = ops.next() {
+                let new_args = std::iter::repeat_with(|| gen.next_reg())
+                    .take(vec.len())
+                    .collect::<Vec<_>>();
+                for (i, pred) in block.preds.iter().enumerate() {
+                    parallel_copies[*pred].push(Operator::Mv(new_args[i], vec[i]));
+                }
+                *vec = new_args;
+            }
+        }
 
+        for (i, mut copies) in parallel_copies.into_iter().enumerate() {
+            let len = ssa.get_block(i).body.len();
+            // found copy to non-live name
+            while !copies.is_empty() {
+                if let Some(op) = {
+                    let mut choices = HashMap::new();
+                    let mut iter = copies.iter().enumerate();
+                    while let Some((i, Operator::Mv(rec, _))) = iter.next() {
+                        choices.insert(rec, i);
+                    }
+                    let mut iter = copies.iter();
+                    while let Some(Operator::Mv(_, op)) = iter.next() {
+                        choices.remove(&op);
+                    }
+                    choices
+                        .values()
+                        .next()
+                        .cloned()
+                        .map(|index| copies.remove(index))
+                } {
+                    ssa.get_block_mut(i)
+                        .body
+                        .insert(len - 1, SSAOperator::IROp(op.clone()));
+                } else {
+                    // break cycle
+                    if let Some(Operator::Mv(_, op)) = copies.last_mut() {
+                        let new_name = gen.next_reg();
+                        ssa.get_block_mut(i)
+                            .body
+                            .insert(len - 1, SSAOperator::IROp(Operator::Mv(new_name, *op)));
+                        *op = new_name;
+                    }
+                }
+            }
+        }
+        #[cfg(feature = "print-cfgs")]
+        {
+            println!("after conventionalizing SSA:{}\n", ssa.to_dot());
+        }
+        ssa.set_max_reg(gen.next_reg());
+    }
+    fn rewrite_liveranges(mut ssa: CFG<SSAOperator>) -> CFG<Operator> {
+        let mut union_find = util::UnionFind::new();
+        let mut new_blocks = Vec::with_capacity(ssa.len());
+        for block in ssa.get_blocks() {
+            let mut ops = block.body.iter();
+            while let Some(SSAOperator::Phi(rec, operands)) = ops.next() {
+                union_find.new_set(*rec);
+                for &op in operands {
+                    union_find.new_set(op);
+                    union_find.union(rec, &op);
+                }
+            }
+        }
+
+        for mut block in std::mem::take(&mut ssa.blocks) {
+            let mut old = std::mem::take(&mut block.body);
+            for op in old.iter_mut() {
+                macro_rules! rewrite {
+                        ($($x:expr),+) => {
+                            {
+                                $(if let Some(leader) = union_find.find($x) {
+                                    *$x = *leader;
+                                })+
+                            }
+                        };
+                    }
+                match op {
+                    SSAOperator::IROp(op_) => match op_ {
+                        crate::ir::Operator::Add(x, y, z) => rewrite!(x, y, z),
+                        crate::ir::Operator::Sub(x, y, z) => rewrite!(x, y, z),
+                        crate::ir::Operator::Mult(x, y, z) => rewrite!(x, y, z),
+                        crate::ir::Operator::Div(x, y, z) => rewrite!(x, y, z),
+                        crate::ir::Operator::And(x, y, z) => rewrite!(x, y, z),
+                        crate::ir::Operator::Or(x, y, z) => rewrite!(x, y, z),
+                        crate::ir::Operator::Mv(x, y) => rewrite!(x, y),
+                        crate::ir::Operator::Xor(x, y, z) => rewrite!(x, y, z),
+                        crate::ir::Operator::Load(x, y, z) => rewrite!(x, y, z),
+                        crate::ir::Operator::Store(x, y, z) => rewrite!(x, y, z),
+                        crate::ir::Operator::La(x, _) => rewrite!(x),
+                        crate::ir::Operator::Bgt(x, y, _, _) => rewrite!(x, y),
+                        crate::ir::Operator::Bl(x, y, _, _) => rewrite!(x, y),
+                        crate::ir::Operator::Beq(x, y, _, _) => rewrite!(x, y),
+                        crate::ir::Operator::Li(x, _) => rewrite!(x),
+                        crate::ir::Operator::Slt(x, y, z) => rewrite!(x, y, z),
+                        crate::ir::Operator::Call(x, _, z) => {
+                            rewrite!(x);
+                            for op in z {
+                                rewrite!(op);
+                            }
+                        }
+                        crate::ir::Operator::Return(x) => rewrite!(x),
+                        crate::ir::Operator::StoreLocal(x, _) => rewrite!(x),
+                        crate::ir::Operator::LoadLocal(x, _) => rewrite!(x),
+                        crate::ir::Operator::GetParameter(x, _) => rewrite!(x),
+                        _ => {}
+                    },
+                    SSAOperator::Phi(..) => {}
+                }
+            }
+            let new: Vec<_> = old
+                .into_iter()
+                .filter_map(|op| match op {
+                    SSAOperator::IROp(op) => Some(op),
+                    SSAOperator::Phi(_, _) => None,
+                })
+                .collect();
+            new_blocks.push(block.into_other(new));
+        }
+        ssa.into_other(new_blocks)
+    }
     impl RISCV64 {
         //todo refactor some general fns out of RV64
         fn pin_liveranges(cfg: &mut CFG<Operator>) -> HashMap<VReg, RV64Reg> {
@@ -374,168 +525,14 @@ strict graph G {{
             }
             res
         }
-        /// no critical edges allowed
-        fn conventionalize_ssa(ssa: &mut CFG<SSAOperator>) {
-            let mut parallel_copies = vec![Vec::new(); ssa.len()];
-            let mut gen = VRegGenerator::starting_at_reg(ssa.get_max_reg());
-            for block in ssa.get_blocks_mut().iter_mut() {
-                let mut ops = block.body.iter_mut();
-                while let Some(SSAOperator::Phi(_, vec)) = ops.next() {
-                    let new_args = std::iter::repeat_with(|| gen.next_reg())
-                        .take(vec.len())
-                        .collect::<Vec<_>>();
-                    for (i, pred) in block.preds.iter().enumerate() {
-                        parallel_copies[*pred].push(Operator::Mv(new_args[i], vec[i]));
-                    }
-                    *vec = new_args;
-                }
-            }
-
-            for (i, mut copies) in parallel_copies.into_iter().enumerate() {
-                let len = ssa.get_block(i).body.len();
-                // found copy to non-live name
-                while !copies.is_empty() {
-                    if let Some(op) = {
-                        let mut choices = HashMap::new();
-                        let mut iter = copies.iter().enumerate();
-                        while let Some((i, Operator::Mv(rec, _))) = iter.next() {
-                            choices.insert(rec, i);
-                        }
-                        let mut iter = copies.iter();
-                        while let Some(Operator::Mv(_, op)) = iter.next() {
-                            choices.remove(&op);
-                        }
-                        choices
-                            .values()
-                            .next()
-                            .cloned()
-                            .map(|index| copies.remove(index))
-                    } {
-                        ssa.get_block_mut(i)
-                            .body
-                            .insert(len - 1, SSAOperator::IROp(op.clone()));
-                    } else {
-                        // break cycle
-                        if let Some(Operator::Mv(_, op)) = copies.last_mut() {
-                            let new_name = gen.next_reg();
-                            ssa.get_block_mut(i)
-                                .body
-                                .insert(len - 1, SSAOperator::IROp(Operator::Mv(new_name, *op)));
-                            *op = new_name;
-                        }
-                    }
-                }
-            }
-            #[cfg(feature = "print-cfgs")]
-            {
-                println!("after conventionalizing SSA:{}\n", ssa.to_dot());
-            }
-            ssa.set_max_reg(gen.next_reg());
-        }
-        fn rewrite_liveranges(mut ssa: CFG<SSAOperator>) -> CFG<Operator> {
-            let mut union_find = util::UnionFind::new();
-            let mut new_blocks = Vec::with_capacity(ssa.len());
-            for block in ssa.get_blocks() {
-                let mut ops = block.body.iter();
-                while let Some(SSAOperator::Phi(rec, operands)) = ops.next() {
-                    union_find.new_set(*rec);
-                    for &op in operands {
-                        union_find.new_set(op);
-                        union_find.union(rec, &op);
-                    }
-                }
-            }
-
-            for mut block in std::mem::take(&mut ssa.blocks) {
-                let mut old = std::mem::take(&mut block.body);
-                for op in old.iter_mut() {
-                    macro_rules! rewrite {
-                        ($($x:expr),+) => {
-                            {
-                                $(if let Some(leader) = union_find.find($x) {
-                                    *$x = *leader;
-                                })+
-                            }
-                        };
-                    }
-                    match op {
-                        SSAOperator::IROp(op_) => match op_ {
-                            crate::ir::Operator::Add(x, y, z) => rewrite!(x, y, z),
-                            crate::ir::Operator::Sub(x, y, z) => rewrite!(x, y, z),
-                            crate::ir::Operator::Mult(x, y, z) => rewrite!(x, y, z),
-                            crate::ir::Operator::Div(x, y, z) => rewrite!(x, y, z),
-                            crate::ir::Operator::And(x, y, z) => rewrite!(x, y, z),
-                            crate::ir::Operator::Or(x, y, z) => rewrite!(x, y, z),
-                            crate::ir::Operator::Mv(x, y) => rewrite!(x, y),
-                            crate::ir::Operator::Xor(x, y, z) => rewrite!(x, y, z),
-                            crate::ir::Operator::Load(x, y, z) => rewrite!(x, y, z),
-                            crate::ir::Operator::Store(x, y, z) => rewrite!(x, y, z),
-                            crate::ir::Operator::La(x, _) => rewrite!(x),
-                            crate::ir::Operator::Bgt(x, y, _, _) => rewrite!(x, y),
-                            crate::ir::Operator::Bl(x, y, _, _) => rewrite!(x, y),
-                            crate::ir::Operator::Beq(x, y, _, _) => rewrite!(x, y),
-                            crate::ir::Operator::Li(x, _) => rewrite!(x),
-                            crate::ir::Operator::Slt(x, y, z) => rewrite!(x, y, z),
-                            crate::ir::Operator::Call(x, _, z) => {
-                                rewrite!(x);
-                                for op in z {
-                                    rewrite!(op);
-                                }
-                            }
-                            crate::ir::Operator::Return(x) => rewrite!(x),
-                            crate::ir::Operator::StoreLocal(x, _) => rewrite!(x),
-                            crate::ir::Operator::LoadLocal(x, _) => rewrite!(x),
-                            crate::ir::Operator::GetParameter(x, _) => rewrite!(x),
-                            _ => {}
-                        },
-                        SSAOperator::Phi(..) => {}
-                    }
-                }
-                let new: Vec<_> = old
-                    .into_iter()
-                    .filter_map(|op| match op {
-                        SSAOperator::IROp(op) => Some(op),
-                        SSAOperator::Phi(_, _) => None,
-                    })
-                    .collect();
-                new_blocks.push(block.into_other(new));
-            }
-            ssa.into_other(new_blocks)
-        }
-        fn build_interference_graph(
-            cfg: &CFG<Operator>,
-        ) -> (InterferenceGraph, HashSet<(VReg, VReg)>) {
-            let mut graph = InterferenceGraph::new();
-            let mut coalescable = HashSet::new();
-            let live_out = cfg.live_out();
-            for (i, block) in cfg.get_blocks().iter().enumerate() {
-                let mut live_now = live_out[i].clone();
-                for op in block.body.iter().rev() {
-                    if let Some(rec) = op.receiver() {
-                        live_now.remove(&rec);
-                        if let Operator::Mv(lr1, lr2) = op {
-                            coalescable.insert((*lr1, *lr2));
-                            live_now
-                                .iter()
-                                .filter(|&lr| lr != lr2)
-                                .for_each(|&lr| graph.add_edge(lr, rec));
-                        } else {
-                            live_now.iter().for_each(|&lr| graph.add_edge(lr, rec));
-                        }
-                    }
-                    live_now.extend(op.dependencies());
-                }
-            }
-            (graph, coalescable)
-        }
     }
 
-    impl Allocator<RV64Reg> for RISCV64 {
+    impl<const N: usize> Allocator<RV64Reg> for RISCV64<N> {
         fn allocate(ssa: CFG<SSAOperator>) -> (CFG<Operator>, HashMap<u64, RV64Reg>) {
-            let mut lr_cfg = RISCV64::rewrite_liveranges(ssa);
+            let mut lr_cfg = rewrite_liveranges(ssa);
 
             let (graph, coloring) = loop {
-                let (mut graph, coalescable) = RISCV64::build_interference_graph(&lr_cfg);
+                let (mut graph, coalescable) = build_interference_graph(&lr_cfg);
                 let mut rebuild = false;
                 // coalesce build loop
                 for (lr1, lr2) in coalescable.into_iter() {
@@ -577,7 +574,7 @@ strict graph G {{
                     .into_iter()
                     .map(|(lr, reg)| (lr, reg as u64))
                     .collect();
-                match graph.find_coloring(32, &pins) {
+                match graph.find_coloring(N, &pins) {
                     Err(_) => {
                         let lr_to_spill = graph
                             .nodes
@@ -659,11 +656,11 @@ strict graph G {{
             let cfg = CFG::from_linear(body, fun.get_params(), fun.get_max_reg());
             let mut ssa = cfg.to_ssa();
             crate::ssa::optimization_sequence(&mut ssa).unwrap();
-            RISCV64::conventionalize_ssa(&mut ssa);
+            super::conventionalize_ssa(&mut ssa);
 
-            let cfg = super::RISCV64::rewrite_liveranges(ssa);
+            let cfg = super::rewrite_liveranges(ssa);
             println!("live ranges: {}", cfg.to_dot());
-            let (graph, _) = super::RISCV64::build_interference_graph(&cfg);
+            let (graph, _) = super::build_interference_graph(&cfg);
 
             println!("{}", graph.to_dot());
 
@@ -710,9 +707,9 @@ strict graph G {{
             let cfg = CFG::from_linear(body, fun.get_params(), fun.get_max_reg());
             let mut ssa = cfg.to_ssa();
             crate::ssa::optimization_sequence(&mut ssa).unwrap();
-            RISCV64::conventionalize_ssa(&mut ssa);
+            super::conventionalize_ssa(&mut ssa);
 
-            let allocation = super::RISCV64::allocate(ssa);
+            let allocation = super::RISCV64::<32>::allocate(ssa);
             println!("allocation: {:?}", allocation.1);
             println!("allocated_graph: {}", allocation.0.to_dot());
         }
