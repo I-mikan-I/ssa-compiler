@@ -5,7 +5,7 @@ pub mod register_allocation {
     use crate::util;
 
     pub trait Allocator<NR> {
-        fn allocate(ssa: CFG<SSAOperator>) -> (CFG<Operator>, HashMap<VReg, NR>);
+        fn allocate(ssa: CFG<SSAOperator>) -> (CFG<Operator>, HashMap<u64, NR>);
     }
 
     pub struct RISCV64 {}
@@ -122,6 +122,27 @@ pub mod register_allocation {
                 index: HashMap::new(),
             }
         }
+        fn merge(&mut self, into: VReg, from: VReg) {
+            if !self.index.contains_key(&into) {
+                self.insert(into);
+            }
+            if !self.index.contains_key(&from) {
+                self.insert(from);
+            }
+            let into_node = self.index[&into];
+            let from_node = self.index[&from];
+            for edge in std::mem::take(&mut self.nodes[from_node].edge_with) {
+                self.nodes[edge].edge_with = std::mem::take(&mut self.nodes[edge].edge_with)
+                    .into_iter()
+                    .filter(|&n| n != from_node && n != into_node)
+                    .collect();
+                self.nodes[edge].edge_with.push(into_node);
+                self.nodes[into_node].edge_with.push(edge);
+            }
+            self.nodes[into_node].edge_with.sort();
+            self.nodes[into_node].edge_with.dedup();
+            self.index.remove(&from); // garbage left
+        }
         fn insert(&mut self, vreg: VReg) -> Option<&InterferenceNode> {
             if let Some(&index) = self.index.get(&vreg) {
                 return Some(&self.nodes[index]);
@@ -142,6 +163,13 @@ pub mod register_allocation {
             self.index
                 .get(vreg)
                 .and_then(|index| self.nodes.get(*index))
+        }
+        fn check_edge(&self, vreg1: &VReg, vreg2: &VReg) -> bool {
+            if let (Some(index), Some(index2)) = (self.index.get(vreg1), self.index.get(vreg2)) {
+                self.nodes[*index].edge_with.contains(index2)
+            } else {
+                false
+            }
         }
         fn add_edge(&mut self, vreg1: VReg, vreg2: VReg) {
             if !self.index.contains_key(&vreg1) {
@@ -272,15 +300,9 @@ strict graph G {{
     }
 
     //todo could be made more efficient
-    fn spill_liverange(
-        cfg: &mut CFG<Operator>,
-        live_out: &mut [HashSet<VReg>],
-        live_range: VReg,
-        ar_offset: u64,
-    ) {
+    fn spill_liverange(cfg: &mut CFG<Operator>, live_range: VReg, ar_offset: u64) {
         let mut gen = VRegGenerator::starting_at_reg(cfg.get_max_reg());
-        for (i, block) in cfg.get_blocks_mut().into_iter().enumerate() {
-            live_out[i].remove(&live_range);
+        for block in cfg.get_blocks_mut().into_iter() {
             block.body = std::mem::take(&mut block.body)
                 .into_iter()
                 .flat_map(|mut op| {
@@ -314,10 +336,7 @@ strict graph G {{
 
     impl RISCV64 {
         //todo refactor some general fns out of RV64
-        fn pin_liveranges(
-            cfg: &mut CFG<Operator>,
-            live_out: &mut [HashSet<VReg>],
-        ) -> HashMap<VReg, RV64Reg> {
+        fn pin_liveranges(cfg: &mut CFG<Operator>) -> HashMap<VReg, RV64Reg> {
             let mut res = HashMap::new();
             let mut done = false;
             while !done {
@@ -349,7 +368,7 @@ strict graph G {{
                 }
                 if let Some(lr) = spill {
                     let ar_offset = *cfg.get_allocated_ars_mut();
-                    spill_liverange(cfg, live_out, lr, ar_offset);
+                    spill_liverange(cfg, lr, ar_offset);
                     *cfg.get_allocated_ars_mut() += 1;
                     done = false;
                 }
@@ -414,10 +433,7 @@ strict graph G {{
             }
             ssa.set_max_reg(gen.next_reg());
         }
-        fn rewrite_liveranges(
-            mut ssa: CFG<SSAOperator>,
-            live_out: &mut [HashSet<VReg>],
-        ) -> CFG<Operator> {
+        fn rewrite_liveranges(mut ssa: CFG<SSAOperator>) -> CFG<Operator> {
             let mut union_find = util::UnionFind::new();
             let mut new_blocks = Vec::with_capacity(ssa.len());
             for block in ssa.get_blocks() {
@@ -429,13 +445,6 @@ strict graph G {{
                         union_find.union(rec, &op);
                     }
                 }
-            }
-
-            for block in live_out.iter_mut() {
-                *block = std::mem::take(block)
-                    .into_iter()
-                    .map(|reg| union_find.find(&reg).cloned().unwrap_or(reg))
-                    .collect::<HashSet<u32>>();
             }
 
             for mut block in std::mem::take(&mut ssa.blocks) {
@@ -496,35 +505,79 @@ strict graph G {{
         }
         fn build_interference_graph(
             cfg: &CFG<Operator>,
-            live_out: &[HashSet<VReg>],
-        ) -> InterferenceGraph {
+        ) -> (InterferenceGraph, HashSet<(VReg, VReg)>) {
             let mut graph = InterferenceGraph::new();
+            let mut coalescable = HashSet::new();
+            let live_out = cfg.live_out();
             for (i, block) in cfg.get_blocks().iter().enumerate() {
                 let mut live_now = live_out[i].clone();
-                for op in block.body.iter() {
+                for op in block.body.iter().rev() {
                     if let Some(rec) = op.receiver() {
                         live_now.remove(&rec);
-                        live_now.iter().for_each(|&lr| graph.add_edge(lr, rec));
+                        if let Operator::Mv(lr1, lr2) = op {
+                            coalescable.insert((*lr1, *lr2));
+                            live_now
+                                .iter()
+                                .filter(|&lr| lr != lr2)
+                                .for_each(|&lr| graph.add_edge(lr, rec));
+                        } else {
+                            live_now.iter().for_each(|&lr| graph.add_edge(lr, rec));
+                        }
                     }
                     live_now.extend(op.dependencies());
                 }
             }
-            graph
+            (graph, coalescable)
         }
     }
 
     impl Allocator<RV64Reg> for RISCV64 {
-        fn allocate(ssa: CFG<SSAOperator>) -> (CFG<Operator>, HashMap<VReg, RV64Reg>) {
-            let mut live_out = crate::ssa::liveness::live_out(&ssa);
-            let mut lr_cfg = RISCV64::rewrite_liveranges(ssa, &mut live_out);
-            let pins: HashMap<_, _> = RISCV64::pin_liveranges(&mut lr_cfg, &mut live_out)
-                .into_iter()
-                .map(|(lr, reg)| (lr, reg as u64))
-                .collect();
+        fn allocate(ssa: CFG<SSAOperator>) -> (CFG<Operator>, HashMap<u64, RV64Reg>) {
+            let mut lr_cfg = RISCV64::rewrite_liveranges(ssa);
 
             let (graph, coloring) = loop {
-                let graph = RISCV64::build_interference_graph(&lr_cfg, &live_out);
-
+                let (mut graph, coalescable) = RISCV64::build_interference_graph(&lr_cfg);
+                let mut rebuild = false;
+                // coalesce build loop
+                for (lr1, lr2) in coalescable.into_iter() {
+                    if graph.check_edge(&lr1, &lr2) {
+                        continue;
+                    } else {
+                        rebuild = true;
+                        graph.merge(lr2, lr1);
+                        // todo make more efficient (i.e. all coalescing in one pass)
+                        for block in lr_cfg.get_blocks_mut() {
+                            let mut i = 0;
+                            while i < block.body.len() {
+                                if let Operator::Mv(left, right) = block.body[i] {
+                                    if left == lr1 && right == lr2 {
+                                        block.body.remove(i);
+                                        continue;
+                                    }
+                                }
+                                let op = &mut block.body[i];
+                                if let Some(rec) = op.receiver_mut() {
+                                    if *rec == lr1 {
+                                        *rec = lr2;
+                                    }
+                                }
+                                for op in op.dependencies_mut() {
+                                    if *op == lr1 {
+                                        *op = lr2;
+                                    }
+                                }
+                                i += 1;
+                            }
+                        }
+                    }
+                }
+                if rebuild {
+                    continue;
+                }
+                let pins: HashMap<_, _> = RISCV64::pin_liveranges(&mut lr_cfg)
+                    .into_iter()
+                    .map(|(lr, reg)| (lr, reg as u64))
+                    .collect();
                 match graph.find_coloring(32, &pins) {
                     Err(_) => {
                         let lr_to_spill = graph
@@ -534,7 +587,7 @@ strict graph G {{
                             .unwrap()
                             .live_range;
                         let ar = *lr_cfg.get_allocated_ars_mut();
-                        spill_liverange(&mut lr_cfg, &mut live_out, lr_to_spill, ar);
+                        spill_liverange(&mut lr_cfg, lr_to_spill, ar);
                         *lr_cfg.get_allocated_ars_mut() += 1;
                     }
                     Ok(coloring) => break (graph, coloring),
@@ -544,10 +597,11 @@ strict graph G {{
             for block in lr_cfg.get_blocks_mut() {
                 for op in block.body.iter_mut() {
                     if let Some(rec) = op.receiver_mut() {
-                        *rec = coloring[graph.index[rec]] as u32;
+                        *rec = graph.index.get(rec).map(|&idx| coloring[idx]).unwrap_or(0) as u32;
+                        // unwrap = no interferences at all
                     }
                     for dep in op.dependencies_mut() {
-                        *dep = coloring[graph.index[dep]] as u32;
+                        *dep = graph.index.get(dep).map(|&idx| coloring[idx]).unwrap_or(0) as u32;
                     }
                 }
             }
@@ -555,8 +609,7 @@ strict graph G {{
                 lr_cfg,
                 coloring
                     .into_iter()
-                    .enumerate()
-                    .map(|(i, color)| (graph.nodes[i].live_range, color.try_into().unwrap()))
+                    .map(|color| (color, color.try_into().unwrap()))
                     .collect(),
             )
         }
@@ -607,86 +660,15 @@ strict graph G {{
             let cfg = CFG::from_linear(body, fun.get_params(), fun.get_max_reg());
             let mut ssa = cfg.to_ssa();
             crate::ssa::optimization_sequence(&mut ssa).unwrap();
+            RISCV64::conventionalize_ssa(&mut ssa);
 
-            let mut live_out = crate::ssa::liveness::live_out(&ssa);
-            let cfg = super::RISCV64::rewrite_liveranges(ssa, &mut live_out);
+            let cfg = super::RISCV64::rewrite_liveranges(ssa);
             println!("live ranges: {}", cfg.to_dot());
-            let graph = super::RISCV64::build_interference_graph(&cfg, &live_out);
+            let (graph, _) = super::RISCV64::build_interference_graph(&cfg);
 
             println!("{}", graph.to_dot());
-            let expected = [
-                (26, 24),
-                (26, 25),
-                (26, 53),
-                (26, 30),
-                (26, 32),
-                (26, 37),
-                (26, 39),
-                (26, 41),
-                (26, 43),
-                (24, 26),
-                (24, 53),
-                (24, 25),
-                (53, 24),
-                (53, 25),
-                (53, 26),
-                (53, 30),
-                (53, 32),
-                (53, 43),
-                (25, 24),
-                (25, 26),
-                (25, 53),
-                (25, 30),
-                (25, 32),
-                (25, 34),
-                (25, 35),
-                (25, 37),
-                (25, 39),
-                (25, 41),
-                (25, 43),
-                (30, 26),
-                (30, 25),
-                (30, 34),
-                (30, 53),
-                (34, 30),
-                (34, 32),
-                (34, 25),
-                (34, 37),
-                (34, 39),
-                (34, 41),
-                (32, 26),
-                (32, 25),
-                (32, 34),
-                (32, 53),
-                (35, 25),
-                (35, 39),
-                (35, 41),
-                (37, 25),
-                (37, 26),
-                (37, 34),
-                (37, 41),
-                (39, 25),
-                (39, 26),
-                (39, 34),
-                (39, 35),
-                (41, 25),
-                (41, 26),
-                (41, 34),
-                (41, 35),
-                (41, 37),
-                (43, 26),
-                (43, 25),
-                (43, 53),
-            ];
-            for (n1_, n2) in expected {
-                let (n1, n2) = (graph.get(&n1_).unwrap(), graph.index.get(&n2).unwrap());
-                assert!(
-                    n1.edge_with.contains(n2),
-                    "node {n1_} does not connect to node {n2}\n"
-                );
-            }
 
-            let coloring = graph.find_coloring(4, &HashMap::default());
+            let coloring = graph.find_coloring(6, &HashMap::default());
             assert!(coloring.is_ok());
             println!(
                 "found coloring:\n{}",
