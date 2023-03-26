@@ -8,10 +8,19 @@ pub mod register_allocation {
         fn allocate(ssa: CFG<SSAOperator>) -> (CFG<Operator>, HashMap<u64, NR>);
     }
 
-    pub struct RISCV64<const N: usize = 32> {}
+    pub trait RegisterSet: Sized + Into<usize> + TryFrom<usize> + Clone {
+        type AllocationError;
+        fn max_regs() -> usize;
+        fn from_colors(
+            colors: &[u64],
+            pins: &HashMap<u64, Self>,
+        ) -> Result<Vec<Self>, Self::AllocationError>;
+    }
 
-    #[repr(u64)]
-    #[derive(Debug)]
+    pub struct RISCV64 {}
+
+    #[repr(usize)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum RV64Reg {
         X0 = 0,   // zero
         X1 = 1,   // ra
@@ -47,6 +56,32 @@ pub mod register_allocation {
         X31 = 31, // t6
     }
     impl RV64Reg {
+        const ALLOCATION_ORDER: [Self; 24] = [
+            Self::X5,
+            Self::X6,
+            Self::X7,
+            Self::X28,
+            Self::X29,
+            Self::X30,
+            Self::X31,
+            Self::X10,
+            Self::X11,
+            Self::X12,
+            Self::X13,
+            Self::X17,
+            Self::X8,
+            Self::X9,
+            Self::X18,
+            Self::X19,
+            Self::X20,
+            Self::X21,
+            Self::X22,
+            Self::X23,
+            Self::X24,
+            Self::X25,
+            Self::X26,
+            Self::X27,
+        ];
         fn get_param_reg(n: u64) -> Option<RV64Reg> {
             use RV64Reg::*;
             match n {
@@ -62,11 +97,37 @@ pub mod register_allocation {
             }
         }
     }
+    impl From<RV64Reg> for usize {
+        fn from(reg: RV64Reg) -> Self {
+            reg as usize
+        }
+    }
+    impl RegisterSet for RV64Reg {
+        type AllocationError = ();
 
-    impl std::convert::TryFrom<u64> for RV64Reg {
+        fn max_regs() -> usize {
+            24
+        }
+
+        fn from_colors(
+            colors: &[u64],
+            pins: &HashMap<u64, Self>,
+        ) -> Result<Vec<Self>, Self::AllocationError> {
+            let mut avail = Self::ALLOCATION_ORDER
+                .into_iter()
+                .filter(|k| !pins.values().any(|k2| k2 == k));
+            colors
+                .iter()
+                .map(|color| pins.get(color).cloned().or_else(|| avail.next()))
+                .collect::<Option<Vec<Self>>>()
+                .ok_or(())
+        }
+    }
+
+    impl std::convert::TryFrom<usize> for RV64Reg {
         type Error = &'static str;
 
-        fn try_from(value: u64) -> Result<Self, Self::Error> {
+        fn try_from(value: usize) -> Result<Self, Self::Error> {
             use RV64Reg::*;
             match value {
                 0 => Ok(X0),
@@ -191,12 +252,12 @@ pub mod register_allocation {
 
     impl InterferenceGraph {
         fn to_dot(&self) -> String {
-            self.to_dot_colored(None)
+            self.to_dot_colored::<RV64Reg>(None)
         }
-        fn to_dot_colored(&self, colors: Option<Vec<u64>>) -> String {
+        fn to_dot_colored<R: RegisterSet>(&self, colors: Option<Vec<R>>) -> String {
             let max_color = colors
                 .as_deref()
-                .and_then(|vec| vec.iter().max().cloned())
+                .and_then(|vec| vec.iter().map(|c| c.clone().into()).max())
                 .map(|n| n + 1);
             let mut interferences = String::new();
             let mut attributes = String::new();
@@ -205,7 +266,7 @@ pub mod register_allocation {
                     attributes.push_str(&format!(
                         "{}[style=filled; fillcolor=\"{},1.0,1.0\"]\n",
                         node.live_range,
-                        vec[i] as f64 / max_color.unwrap() as f64
+                        vec[i].clone().into() as f64 / max_color.unwrap() as f64
                     ));
                 }
                 for node2 in &node.edge_with {
@@ -223,12 +284,9 @@ strict graph G {{
 }}"
             )
         }
-        fn find_coloring(
-            &self,
-            max_colors: usize,
-            pins: &HashMap<VReg, u64>,
-        ) -> Result<Vec<u64>, ()> {
+        fn find_coloring<R: RegisterSet>(&self, pins: &HashMap<VReg, R>) -> Result<Vec<R>, ()> {
             use z3::ast::*;
+            let max_colors = R::max_regs();
             let mut config = z3::Config::new();
             config.set_model_generation(true);
             let context = z3::Context::new(&config);
@@ -258,7 +316,7 @@ strict graph G {{
             for (i, node) in self.nodes.iter().enumerate() {
                 if let Some(reg) = pins.get(&node.live_range) {
                     solver.assert(
-                        &nodes_native_regs[*reg as usize]
+                        &nodes_native_regs[reg.clone().into()]
                             ._safe_eq(&nodes_z3[i])
                             .unwrap(),
                     );
@@ -291,16 +349,16 @@ strict graph G {{
             }
             let model = solver.get_model().unwrap();
 
-            let color_to_reg = nodes_native_regs
-                .into_iter()
-                .enumerate()
-                .map(|(i, v)| (model.eval(&v, true).unwrap().as_u64().unwrap(), i as u64))
-                .collect::<HashMap<_, _>>();
+            let colors = nodes_z3
+                .iter()
+                .map(|node| model.eval(node, true).unwrap().as_u64().unwrap())
+                .collect::<Vec<_>>();
+            let color_pins = pins
+                .iter()
+                .map(|(k, v)| (colors[self.index[k]], v.clone()))
+                .collect();
 
-            Ok(nodes_z3
-                .into_iter()
-                .map(|node| color_to_reg[&model.eval(&node, true).unwrap().as_u64().unwrap()])
-                .collect())
+            R::from_colors(&colors, &color_pins).map_err(|_| ())
         }
     }
 
@@ -533,7 +591,7 @@ strict graph G {{
         }
     }
 
-    impl<const N: usize> Allocator<RV64Reg> for RISCV64<N> {
+    impl Allocator<RV64Reg> for RISCV64 {
         fn allocate(ssa: CFG<SSAOperator>) -> (CFG<Operator>, HashMap<u64, RV64Reg>) {
             let mut lr_cfg = rewrite_liveranges(ssa);
 
@@ -576,14 +634,11 @@ strict graph G {{
                 if rebuild {
                     continue;
                 }
-                let pins: HashMap<_, _> = RISCV64::pin_liveranges(&mut lr_cfg)
-                    .into_iter()
-                    .map(|(lr, reg)| (lr, reg as u64))
-                    .collect();
+                let pins: HashMap<_, _> = RISCV64::pin_liveranges(&mut lr_cfg);
                 for lr in pins.keys() {
                     graph.maybe_insert(*lr);
                 }
-                match graph.find_coloring(N, &pins) {
+                match graph.find_coloring(&pins) {
                     Err(_) => {
                         let lr_to_spill = graph
                             .nodes
@@ -602,11 +657,19 @@ strict graph G {{
             for block in lr_cfg.get_blocks_mut() {
                 for op in block.body.iter_mut() {
                     if let Some(rec) = op.receiver_mut() {
-                        *rec = graph.index.get(rec).map(|&idx| coloring[idx]).unwrap_or(0) as u32;
+                        *rec = graph
+                            .index
+                            .get(rec)
+                            .map(|&idx| <RV64Reg as Into<usize>>::into(coloring[idx]))
+                            .unwrap_or(coloring[0].into()) as u32;
                         // unwrap = no interferences at all
                     }
                     for dep in op.dependencies_mut() {
-                        *dep = graph.index.get(dep).map(|&idx| coloring[idx]).unwrap_or(0) as u32;
+                        *dep = graph
+                            .index
+                            .get(dep)
+                            .map(|&idx| <RV64Reg as Into<usize>>::into(coloring[idx]))
+                            .unwrap_or(coloring[0].into()) as u32;
                     }
                 }
             }
@@ -614,7 +677,7 @@ strict graph G {{
                 lr_cfg,
                 coloring
                     .into_iter()
-                    .map(|color| (color, color.try_into().unwrap()))
+                    .map(|color| (<RV64Reg as Into<usize>>::into(color) as u64, color))
                     .collect(),
             )
         }
@@ -623,7 +686,10 @@ strict graph G {{
     mod tests {
         use std::collections::HashMap;
 
-        use crate::{backend::register_allocation::Allocator, ir::CFG};
+        use crate::{
+            backend::register_allocation::{Allocator, RV64Reg},
+            ir::CFG,
+        };
 
         #[test]
         fn construct_graph() {
@@ -670,7 +736,7 @@ strict graph G {{
 
             println!("{}", graph.to_dot());
 
-            let coloring = graph.find_coloring(6, &HashMap::default());
+            let coloring = graph.find_coloring::<RV64Reg>(&HashMap::default());
             assert!(coloring.is_ok());
             println!(
                 "found coloring:\n{}",
@@ -715,7 +781,7 @@ strict graph G {{
             crate::ssa::optimization_sequence(&mut ssa).unwrap();
             super::conventionalize_ssa(&mut ssa);
 
-            let allocation = super::RISCV64::<32>::allocate(ssa);
+            let allocation = super::RISCV64::allocate(ssa);
             println!("allocation: {:?}", allocation.1);
             println!("allocated_graph: {}", allocation.0.to_dot());
         }
@@ -753,7 +819,7 @@ strict graph G {{
             crate::ssa::optimization_sequence(&mut ssa).unwrap();
             super::conventionalize_ssa(&mut ssa);
 
-            let allocation = super::RISCV64::<32>::allocate(ssa);
+            let allocation = super::RISCV64::allocate(ssa);
             println!("allocation: {:?}", allocation.1);
             println!("allocated_graph: {}", allocation.0.to_dot());
         }

@@ -649,7 +649,7 @@ pub mod gvn_pre {
             let mut leaders_in = block
                 .idom
                 .map(|idom| leaders[idom].clone())
-                .unwrap_or_else(|| HashMap::new());
+                .unwrap_or_else(HashMap::new);
             let mut body_old = vec![];
             std::mem::swap(&mut body_old, &mut block.body);
             block.body = body_old
