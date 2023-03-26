@@ -1,6 +1,6 @@
 # Rust 🦀 SSA Compiler WIP
 
-A compiler that uses SSA (single static assignment) form as its definitive IR written in pure Rust!
+A compiler that uses SSA (single static assignment form) as its definitive IR written entirely in Rust!
 
 The compiler will host an optimization pipeline and native machine code generation.
 
