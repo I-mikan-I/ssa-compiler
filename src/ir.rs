@@ -79,7 +79,11 @@
 //!                 j @l1
 //!                 label(): ... // @l2
 //! identifier((arg0), (arg1), ...)
-//! =>              call @label(identifier) (lin(arg0), lin(arg1), ...)
+//! =>              j @l1
+//!                 label():    // @l1
+//!                 call @label(identifier) (lin(arg0), lin(arg1), ...)
+//!                 j @l2
+//!                 label():    // @l2
 //! return (E) =>   return lin(E)
 //!                 label():    // dead
 //!
@@ -596,7 +600,13 @@ fn translate_block(
                 }
                 let result = gen.next_reg();
                 let (name, _) = scope.get_key_value(f.as_str()).unwrap();
+                let l1 = gen.next_label().into();
+                let l2 = gen.next_label().into();
+                vec.push(Operator::J(Rc::clone(&l1)));
+                vec.push(Operator::Label(Rc::clone(&l1)));
                 vec.push(Operator::Call(result, Rc::clone(name), regs));
+                vec.push(Operator::J(Rc::clone(&l2)));
+                vec.push(Operator::Label(Rc::clone(&l2)));
                 Some(result)
             }
             parser_defs::Unit::Grouping(e) => translate_block(vec, scope, Any::E(e), gen),

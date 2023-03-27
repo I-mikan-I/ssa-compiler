@@ -364,6 +364,7 @@ strict graph G {{
 
     //todo could be made more efficient
     fn spill_liverange(cfg: &mut CFG<Operator>, live_range: VReg, ar_offset: u64) {
+        println!("before spill: {}", cfg.to_dot());
         let mut gen = VRegGenerator::starting_at_reg(cfg.get_max_reg());
         for block in cfg.get_blocks_mut().iter_mut() {
             block.body = std::mem::take(&mut block.body)
@@ -550,26 +551,33 @@ strict graph G {{
     }
     impl RISCV64 {
         //todo refactor some general fns out of RV64
-        fn pin_liveranges(cfg: &mut CFG<Operator>) -> HashMap<VReg, RV64Reg> {
-            let mut res = HashMap::new();
-            let mut done = false;
-            while !done {
-                done = true;
+        fn pin_liveranges(cfg: &mut CFG<Operator>) -> (HashMap<VReg, RV64Reg>, bool) {
+            let mut spilled = false;
+            loop {
+                let mut res = HashMap::new();
                 let mut spill = None;
                 for block in cfg.get_blocks() {
                     for op in block.body.iter() {
                         match op {
                             Operator::GetParameter(x, n) => {
-                                if res.contains_key(x) {
+                                let pin = RV64Reg::get_param_reg(*n).unwrap();
+                                if res.contains_key(x) && res.get(x) != Some(&pin) {
                                     spill = Some(*x);
                                     break;
                                 }
                                 res.insert(*x, RV64Reg::get_param_reg(*n).unwrap());
                                 // todo add support for params > n
                             }
-                            Operator::Call(_, _, ops) => {
+                            Operator::Call(rec, _, ops) => {
+                                let pin = RV64Reg::get_param_reg(0).unwrap();
+                                if res.contains_key(rec) && res.get(rec) != Some(&pin) {
+                                    spill = Some(*rec);
+                                    break;
+                                }
+                                res.insert(*rec, RV64Reg::get_param_reg(0).unwrap());
                                 for (i, op) in ops.iter().enumerate() {
-                                    if res.contains_key(op) {
+                                    let pin = RV64Reg::get_param_reg(i as u64).unwrap();
+                                    if res.contains_key(op) && res.get(op) != Some(&pin) {
                                         spill = Some(*op);
                                         break;
                                     }
@@ -581,13 +589,15 @@ strict graph G {{
                     }
                 }
                 if let Some(lr) = spill {
+                    spilled = true;
                     let ar_offset = *cfg.get_allocated_ars_mut();
                     spill_liverange(cfg, lr, ar_offset);
                     *cfg.get_allocated_ars_mut() += 1;
-                    done = false;
+                    continue;
+                } else {
+                    return (res, spilled);
                 }
             }
-            res
         }
     }
 
@@ -595,15 +605,13 @@ strict graph G {{
         fn allocate(ssa: CFG<SSAOperator>) -> (CFG<Operator>, HashMap<u64, RV64Reg>) {
             let mut lr_cfg = rewrite_liveranges(ssa);
 
-            let (graph, coloring) = loop {
+            let (graph, coloring) = 'build_allocate: loop {
                 let (mut graph, coalescable) = build_interference_graph(&lr_cfg);
-                let mut rebuild = false;
                 // coalesce build loop
                 for (lr1, lr2) in coalescable.into_iter() {
                     if graph.check_edge(&lr1, &lr2) {
                         continue;
                     } else {
-                        rebuild = true;
                         graph.merge(lr2, lr1);
                         // todo make more efficient (i.e. all coalescing in one pass)
                         for block in lr_cfg.get_blocks_mut() {
@@ -629,12 +637,13 @@ strict graph G {{
                                 i += 1;
                             }
                         }
+                        continue 'build_allocate;
                     }
                 }
-                if rebuild {
-                    continue;
+                let (pins, rebuild_graph) = RISCV64::pin_liveranges(&mut lr_cfg);
+                if rebuild_graph {
+                    continue 'build_allocate;
                 }
-                let pins: HashMap<_, _> = RISCV64::pin_liveranges(&mut lr_cfg);
                 for lr in pins.keys() {
                     graph.maybe_insert(*lr);
                 }
@@ -673,6 +682,10 @@ strict graph G {{
                     }
                 }
             }
+            #[cfg(feature = "print-cfgs")]
+            {
+                println!("After register allocation:\n{}", lr_cfg.to_dot());
+            }
             (
                 lr_cfg,
                 coloring
@@ -688,7 +701,7 @@ strict graph G {{
 
         use crate::{
             backend::register_allocation::{Allocator, RV64Reg},
-            ir::CFG,
+            ir::{Operator, CFG},
         };
 
         #[test]
@@ -786,7 +799,7 @@ strict graph G {{
             println!("allocated_graph: {}", allocation.0.to_dot());
         }
         #[test]
-        fn allocate_program_calls() {
+        fn allocate_program_calls_no_spill() {
             let input = "
         myvar3 :: Bool = false;
         lambda myfun(myvar3 :: Int) :: Int {
@@ -820,6 +833,62 @@ strict graph G {{
             super::conventionalize_ssa(&mut ssa);
 
             let allocation = super::RISCV64::allocate(ssa);
+            assert_eq!(
+                allocation.0.blocks[3].body[0],
+                Operator::Call(10, "myfun".into(), vec![10])
+            );
+            assert_eq!(
+                allocation.0.blocks[0].body[0],
+                Operator::GetParameter(10, 0)
+            );
+            assert_eq!(allocation.0.blocks[5].body[0], Operator::Return(10));
+            println!("allocation: {:?}", allocation.1);
+            println!("allocated_graph: {}", allocation.0.to_dot());
+        }
+        #[test]
+        fn allocate_program_calls_spill() {
+            let input = "
+        myvar3 :: Bool = false;
+        lambda myfun(myvar3 :: Int, myvar5 :: Int) :: Int {
+            myvar4 :: Int = 0;
+            i :: Int = 100;
+            while (i >= 0) do {
+                myvar4 = myfun(3, myvar4);
+                i = i - 1;
+            }
+           return myvar4;
+        }
+        myvar2 :: Bool = true;
+        ";
+            let result = crate::parser::parse(&input);
+            assert!(result.1.is_empty());
+            assert!(result.0.is_some());
+            assert!(result.0.as_ref().unwrap().is_ok());
+            let p = result.0.unwrap().unwrap();
+            let res = crate::parser::validate(&p);
+            assert!(res.is_none(), "{}", res.unwrap());
+
+            let mut context = crate::ir::Context::new();
+            crate::ir::translate_program(&mut context, &p);
+            let funs = context.get_functions();
+            let fun = funs.get("myfun").unwrap();
+            let body = fun.get_body();
+
+            let cfg = CFG::from_linear(body, fun.get_params(), fun.get_max_reg());
+            let mut ssa = cfg.to_ssa();
+            crate::ssa::optimization_sequence(&mut ssa).unwrap();
+            super::conventionalize_ssa(&mut ssa);
+
+            let allocation = super::RISCV64::allocate(ssa);
+            assert_eq!(
+                allocation.0.blocks[3].body[0],
+                Operator::Call(10, "myfun".into(), vec![10])
+            );
+            assert_eq!(
+                allocation.0.blocks[0].body[0],
+                Operator::GetParameter(10, 0)
+            );
+            assert_eq!(allocation.0.blocks[5].body[0], Operator::Return(10));
             println!("allocation: {:?}", allocation.1);
             println!("allocated_graph: {}", allocation.0.to_dot());
         }
