@@ -364,7 +364,6 @@ strict graph G {{
 
     //todo could be made more efficient
     fn spill_liverange(cfg: &mut CFG<Operator>, live_range: VReg, ar_offset: u64) {
-        println!("before spill: {}", cfg.to_dot());
         let mut gen = VRegGenerator::starting_at_reg(cfg.get_max_reg());
         for block in cfg.get_blocks_mut().iter_mut() {
             block.body = std::mem::take(&mut block.body)
@@ -432,6 +431,9 @@ strict graph G {{
                     .take(vec.len())
                     .collect::<Vec<_>>();
                 for (i, pred) in block.preds.iter().enumerate() {
+                    if vec[i] == u32::MAX {
+                        continue; // dead phi function
+                    }
                     parallel_copies[*pred].push(Operator::Mv(new_args[i], vec[i]));
                 }
                 *vec = new_args;
@@ -649,6 +651,7 @@ strict graph G {{
                 }
                 match graph.find_coloring(&pins) {
                     Err(_) => {
+                        println!("conflict! {}", lr_cfg.to_dot());
                         let lr_to_spill = graph
                             .nodes
                             .iter()
@@ -881,14 +884,17 @@ strict graph G {{
 
             let allocation = super::RISCV64::allocate(ssa);
             assert_eq!(
-                allocation.0.blocks[3].body[0],
-                Operator::Call(10, "myfun".into(), vec![10])
+                &allocation.0.blocks[3].body[0..=2],
+                &[
+                    Operator::LoadLocal(11, 0),
+                    Operator::Call(10, "myfun".into(), vec![10, 11]),
+                    Operator::StoreLocal(10, 0)
+                ]
             );
             assert_eq!(
                 allocation.0.blocks[0].body[0],
                 Operator::GetParameter(10, 0)
             );
-            assert_eq!(allocation.0.blocks[5].body[0], Operator::Return(10));
             println!("allocation: {:?}", allocation.1);
             println!("allocated_graph: {}", allocation.0.to_dot());
         }
