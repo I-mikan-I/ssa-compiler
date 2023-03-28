@@ -446,6 +446,10 @@ fn translate_function(
         );
         let code = context.functions.get_mut(i).unwrap().get_body_mut();
         translate_block(code, scope, Any::B(b), &mut gen);
+        #[cfg(feature = "print-linear")]
+        {
+            println!("translated function {i}:\n{}", Displayable(&code));
+        }
         context.functions.get_mut(i).unwrap().max_reg = gen.next_reg();
     } else {
         panic!("Expected function def")
@@ -1073,13 +1077,30 @@ impl CFG<Operator> {
 
         let mut gc_map = vec![usize::MAX; blocks.len()];
         let exit = blocks.len() - 1;
-        blocks = blocks
+        let mut blocks: Vec<_> = blocks.into_iter().enumerate().collect();
+        let mut pruned = HashSet::new();
+        let mut changed = true;
+        while changed {
+            changed = false;
+            blocks.retain(|(old, block)| {
+                if (block.preds.is_empty() || block.preds.iter().all(|idx| pruned.contains(idx)))
+                    && *old != 0
+                    && *old != exit
+                {
+                    changed = true;
+                    pruned.insert(*old);
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+        let mut blocks: Vec<Block<_>> = blocks
             .into_iter()
-            .enumerate()
-            .filter(|(i, b)| !b.preds.is_empty() || *i == 0 || *i == exit)
             .enumerate()
             .map(|(new, (old, b))| {
                 gc_map[old] = new;
+                debug_assert_ne!(new, usize::MAX);
                 b
             })
             .collect();

@@ -1,11 +1,13 @@
 pub mod register_allocation {
     use std::collections::{HashMap, HashSet};
+    use std::fmt::Display;
 
     use crate::ir::{Operator, SSAOperator, VReg, VRegGenerator, CFG};
     use crate::util;
 
     pub trait Allocator<NR> {
-        fn allocate(ssa: CFG<SSAOperator>) -> (CFG<Operator>, HashMap<u64, NR>);
+        fn allocate(ssa: CFG<SSAOperator>) -> (CFG<Operator>, HashMap<VReg, NR>);
+        fn add_procedure_prologues(cfg: &mut CFG<Operator>, allocs: &HashMap<VReg, NR>);
     }
 
     pub trait RegisterSet: Sized + Into<usize> + TryFrom<usize> + Clone {
@@ -20,7 +22,7 @@ pub mod register_allocation {
     pub struct RISCV64 {}
 
     #[repr(usize)]
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub enum RV64Reg {
         X0 = 0,   // zero
         X1 = 1,   // ra
@@ -55,6 +57,44 @@ pub mod register_allocation {
         X30 = 30,
         X31 = 31, // t6
     }
+    impl Display for RV64Reg {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                RV64Reg::X0 => write!(f, "x0"),
+                RV64Reg::X1 => write!(f, "x1"),
+                RV64Reg::X2 => write!(f, "x2"),
+                RV64Reg::X3 => write!(f, "x3"),
+                RV64Reg::X4 => write!(f, "x4"),
+                RV64Reg::X5 => write!(f, "x5"),
+                RV64Reg::X6 => write!(f, "x6"),
+                RV64Reg::X7 => write!(f, "x7"),
+                RV64Reg::X8 => write!(f, "x8"),
+                RV64Reg::X9 => write!(f, "x9"),
+                RV64Reg::X10 => write!(f, "x10"),
+                RV64Reg::X11 => write!(f, "x11"),
+                RV64Reg::X12 => write!(f, "x12"),
+                RV64Reg::X13 => write!(f, "x13"),
+                RV64Reg::X14 => write!(f, "x14"),
+                RV64Reg::X15 => write!(f, "x15"),
+                RV64Reg::X16 => write!(f, "x16"),
+                RV64Reg::X17 => write!(f, "x17"),
+                RV64Reg::X18 => write!(f, "x18"),
+                RV64Reg::X19 => write!(f, "x19"),
+                RV64Reg::X20 => write!(f, "x20"),
+                RV64Reg::X21 => write!(f, "x21"),
+                RV64Reg::X22 => write!(f, "x22"),
+                RV64Reg::X23 => write!(f, "x23"),
+                RV64Reg::X24 => write!(f, "x24"),
+                RV64Reg::X25 => write!(f, "x25"),
+                RV64Reg::X26 => write!(f, "x26"),
+                RV64Reg::X27 => write!(f, "x27"),
+                RV64Reg::X28 => write!(f, "x28"),
+                RV64Reg::X29 => write!(f, "x29"),
+                RV64Reg::X30 => write!(f, "x30"),
+                RV64Reg::X31 => write!(f, "x31"),
+            }
+        }
+    }
     impl RV64Reg {
         const ALLOCATION_ORDER: [Self; 24] = [
             Self::X5,
@@ -82,6 +122,23 @@ pub mod register_allocation {
             Self::X26,
             Self::X27,
         ];
+        fn callee_saved(&self) -> bool {
+            match self {
+                RV64Reg::X8
+                | RV64Reg::X9
+                | RV64Reg::X18
+                | RV64Reg::X19
+                | RV64Reg::X20
+                | RV64Reg::X21
+                | RV64Reg::X22
+                | RV64Reg::X23
+                | RV64Reg::X24
+                | RV64Reg::X25
+                | RV64Reg::X26
+                | RV64Reg::X27 => true,
+                _ => false,
+            }
+        }
         fn get_param_reg(n: u64) -> Option<RV64Reg> {
             use RV64Reg::*;
             match n {
@@ -421,7 +478,7 @@ strict graph G {{
         (graph, coalescable)
     }
     /// no critical edges allowed
-    fn conventionalize_ssa(ssa: &mut CFG<SSAOperator>) {
+    pub fn conventionalize_ssa(ssa: &mut CFG<SSAOperator>) {
         let mut parallel_copies = vec![Vec::new(); ssa.len()];
         let mut gen = VRegGenerator::starting_at_reg(ssa.get_max_reg());
         for block in ssa.get_blocks_mut().iter_mut() {
@@ -567,7 +624,7 @@ strict graph G {{
                                     spill = Some(*x);
                                     break;
                                 }
-                                res.insert(*x, RV64Reg::get_param_reg(*n).unwrap());
+                                res.insert(*x, pin);
                                 // todo add support for params > n
                             }
                             Operator::Call(rec, _, ops) => {
@@ -576,15 +633,23 @@ strict graph G {{
                                     spill = Some(*rec);
                                     break;
                                 }
-                                res.insert(*rec, RV64Reg::get_param_reg(0).unwrap());
+                                res.insert(*rec, pin);
                                 for (i, op) in ops.iter().enumerate() {
                                     let pin = RV64Reg::get_param_reg(i as u64).unwrap();
                                     if res.contains_key(op) && res.get(op) != Some(&pin) {
                                         spill = Some(*op);
                                         break;
                                     }
-                                    res.insert(*op, RV64Reg::get_param_reg(i as u64).unwrap());
+                                    res.insert(*op, pin);
                                 }
+                            }
+                            Operator::Return(op) => {
+                                let pin = RV64Reg::get_param_reg(0).unwrap();
+                                if res.contains_key(op) && res.get(op) != Some(&pin) {
+                                    spill = Some(*op);
+                                    break;
+                                }
+                                res.insert(*op, pin);
                             }
                             _ => {}
                         }
@@ -604,7 +669,7 @@ strict graph G {{
     }
 
     impl Allocator<RV64Reg> for RISCV64 {
-        fn allocate(ssa: CFG<SSAOperator>) -> (CFG<Operator>, HashMap<u64, RV64Reg>) {
+        fn allocate(ssa: CFG<SSAOperator>) -> (CFG<Operator>, HashMap<VReg, RV64Reg>) {
             let mut lr_cfg = rewrite_liveranges(ssa);
 
             let (graph, coloring) = 'build_allocate: loop {
@@ -693,9 +758,63 @@ strict graph G {{
                 lr_cfg,
                 coloring
                     .into_iter()
-                    .map(|color| (<RV64Reg as Into<usize>>::into(color) as u64, color))
+                    .map(|color| (<RV64Reg as Into<usize>>::into(color) as VReg, color))
                     .collect(),
             )
+        }
+
+        /// callsites must be isolated (excluding spills);
+        fn add_procedure_prologues(cfg: &mut CFG<Operator>, allocs: &HashMap<VReg, RV64Reg>) {
+            let ar = *cfg.get_allocated_ars_mut();
+            let mut ar_max = ar;
+            let live_out = cfg.live_out();
+            let callee_saved = allocs.values().filter(|reg| reg.callee_saved());
+
+            for (i, block) in cfg.get_blocks_mut().iter_mut().enumerate() {
+                if block.body.iter().any(|op| matches!(op, Operator::Call(..))) {
+                    let mut ar_ = ar;
+                    debug_assert_eq!(block.preds.len(), 1);
+                    let to_save: Vec<_> = live_out[i]
+                        .intersection(&live_out[block.preds[0]])
+                        .filter(|reg| !allocs[reg].callee_saved())
+                        .collect();
+                    let mut prologue: Vec<_> = to_save
+                        .iter()
+                        .map(|&&reg| {
+                            let res = Operator::StoreLocal(reg, ar_);
+                            ar_ += 1;
+                            res
+                        })
+                        .collect();
+                    let mut ar_ = ar;
+                    let mut epilogue: Vec<_> = to_save
+                        .iter()
+                        .map(|&&reg| {
+                            let res = Operator::LoadLocal(reg, ar_);
+                            ar_ += 1;
+                            res
+                        })
+                        .collect();
+                    prologue.append(&mut block.body);
+                    prologue.append(&mut epilogue);
+                    block.body = prologue;
+                    ar_max = std::cmp::max(ar_max, ar_);
+                }
+            }
+
+            let mut ar = ar_max;
+            *cfg.get_allocated_ars_mut() = ar_max;
+
+            for &saved in callee_saved {
+                cfg.get_block_mut(cfg.get_entry())
+                    .body
+                    .insert(0, Operator::StoreLocal(usize::from(saved) as VReg, ar));
+                cfg.get_block_mut(cfg.get_exit())
+                    .body
+                    .push(Operator::LoadLocal(usize::from(saved) as VReg, ar));
+                ar += 1;
+            }
+            *cfg.get_allocated_ars_mut() = ar;
         }
     }
     #[cfg(test)]
@@ -897,6 +1016,379 @@ strict graph G {{
             );
             println!("allocation: {:?}", allocation.1);
             println!("allocated_graph: {}", allocation.0.to_dot());
+        }
+        #[test]
+        fn program_calls_spill_prologues() {
+            let input = "
+        myvar3 :: Bool = false;
+        lambda myfun(myvar3 :: Int, myvar5 :: Int) :: Int {
+            myvar4 :: Int = 0;
+            i :: Int = 100;
+            while (i >= 0) do {
+                myvar4 = myfun(3, myvar4);
+                i = i - 1;
+            }
+           return myvar4;
+        }
+        myvar2 :: Bool = true;
+        ";
+            let result = crate::parser::parse(&input);
+            assert!(result.1.is_empty());
+            assert!(result.0.is_some());
+            assert!(result.0.as_ref().unwrap().is_ok());
+            let p = result.0.unwrap().unwrap();
+            let res = crate::parser::validate(&p);
+            assert!(res.is_none(), "{}", res.unwrap());
+
+            let mut context = crate::ir::Context::new();
+            crate::ir::translate_program(&mut context, &p);
+            let funs = context.get_functions();
+            let fun = funs.get("myfun").unwrap();
+            let body = fun.get_body();
+
+            let cfg = CFG::from_linear(body, fun.get_params(), fun.get_max_reg());
+            let mut ssa = cfg.to_ssa();
+            crate::ssa::optimization_sequence(&mut ssa).unwrap();
+            super::conventionalize_ssa(&mut ssa);
+
+            let mut allocation = super::RISCV64::allocate(ssa);
+            super::RISCV64::add_procedure_prologues(&mut allocation.0, &allocation.1);
+            assert!(allocation.0.blocks[3]
+                .body
+                .iter()
+                .take(3)
+                .all(|op| matches!(op, Operator::StoreLocal(..))));
+        }
+    }
+}
+
+pub mod instruction_selection {
+    use std::{
+        collections::{HashMap, HashSet, VecDeque},
+        fmt::Display,
+        rc::Rc,
+    };
+
+    use crate::ir::{Operator, VReg, CFG};
+
+    use super::register_allocation::RV64Reg;
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    #[allow(non_camel_case_types)]
+    pub enum RV64Operation {
+        ADD(RV64Reg, RV64Reg, RV64Reg),
+        ADDI(RV64Reg, RV64Reg, i16),
+        SUB(RV64Reg, RV64Reg, RV64Reg),
+        SQ(RV64Reg, RV64Reg, i16),
+        LQ(RV64Reg, RV64Reg, i16),
+        AND(RV64Reg, RV64Reg, RV64Reg),
+        OR(RV64Reg, RV64Reg, RV64Reg),
+        XOR(RV64Reg, RV64Reg, RV64Reg),
+        MUL(RV64Reg, RV64Reg, RV64Reg),
+        DIV(RV64Reg, RV64Reg, RV64Reg),
+        SLT(RV64Reg, RV64Reg, RV64Reg),
+        PSEUD_LA(RV64Reg, Rc<str>),
+        PSEUD_CALL(Rc<str>),
+        PSEUD_RET,
+        PSEUD_J(Rc<str>),
+        PSEUD_LI(RV64Reg, i64),
+        PSEUD_LABEL(Rc<str>),
+        BEQ(RV64Reg, RV64Reg, Rc<str>),
+        BGE(RV64Reg, RV64Reg, Rc<str>),
+        BL(RV64Reg, RV64Reg, Rc<str>),
+    }
+
+    impl CFG<RV64Operation> {
+        fn linearize(self) -> Vec<RV64Operation> {
+            let mut placed = HashSet::new();
+            let mut worklist = VecDeque::new();
+            worklist.push_back(self.get_block(self.get_entry()));
+            let mut result = Vec::new();
+            while let Some(to_place) = worklist.pop_front() {
+                if placed.contains(&to_place.label) {
+                    continue;
+                }
+                result.push(RV64Operation::PSEUD_LABEL(Rc::clone(&to_place.label)));
+                for op in to_place.body.iter() {
+                    match op {
+                        RV64Operation::PSEUD_J(t) => {
+                            if placed.contains(t) {
+                                result.push(op.clone());
+                            } else {
+                                worklist.push_front(
+                                    self.blocks.iter().find(|b| &b.label == t).unwrap(),
+                                );
+                            }
+                        }
+
+                        RV64Operation::BEQ(_, _, l)
+                        | RV64Operation::BGE(_, _, l)
+                        | RV64Operation::BL(_, _, l) => {
+                            debug_assert_eq!(to_place.children.len(), 2);
+                            let r = self.get_block(to_place.children[1]);
+                            result.push(op.clone());
+                            if placed.contains(&r.label) {
+                                result.push(RV64Operation::PSEUD_J(Rc::clone(&r.label)));
+                            } else {
+                                worklist.push_front(r);
+                            }
+                            worklist.push_back(self.blocks.iter().find(|b| &b.label == l).unwrap());
+                        }
+                        op => {
+                            result.push(op.clone());
+                        }
+                    }
+                }
+                placed.insert(Rc::clone(&to_place.label));
+            }
+            result
+        }
+    }
+
+    impl Display for RV64Operation {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                RV64Operation::ADD(r1, r2, r3) => write!(f, "add {r1},{r2},{r3}"),
+                RV64Operation::ADDI(r1, r2, r3) => write!(f, "addi {r1},{r2},{r3}"),
+                RV64Operation::SUB(r1, r2, r3) => write!(f, "sub {r1},{r2},{r3}"),
+                RV64Operation::SQ(r1, r2, r3) => write!(f, "sd {r1},{r3}({r2})"),
+                RV64Operation::LQ(r1, r2, r3) => write!(f, "ld {r1},{r3}({r2})"),
+                RV64Operation::AND(r1, r2, r3) => write!(f, "and {r1},{r2},{r3}"),
+                RV64Operation::OR(r1, r2, r3) => write!(f, "or {r1},{r2},{r3}"),
+                RV64Operation::XOR(r1, r2, r3) => write!(f, "xor {r1},{r2},{r3}"),
+                RV64Operation::MUL(r1, r2, r3) => write!(f, "mul {r1},{r2},{r3}"),
+                RV64Operation::DIV(r1, r2, r3) => write!(f, "div {r1},{r2},{r3}"),
+                RV64Operation::SLT(r1, r2, r3) => write!(f, "slt {r1},{r2},{r3}"),
+                RV64Operation::PSEUD_LA(r1, r2) => write!(f, "la {r1},{r2}"),
+                RV64Operation::PSEUD_CALL(r1) => write!(f, "call {r1}"),
+                RV64Operation::PSEUD_RET => write!(f, "ret"),
+                RV64Operation::PSEUD_J(r1) => write!(f, "j .{r1}"),
+                RV64Operation::PSEUD_LI(r1, r2) => write!(f, "li {r1},{r2}"),
+                RV64Operation::PSEUD_LABEL(l) => write!(f, ".{l}:"),
+                RV64Operation::BEQ(r1, r2, r3) => write!(f, "beq {r1},{r2},.{r3}"),
+                RV64Operation::BGE(r1, r2, r3) => write!(f, "bge {r1},{r2},.{r3}"),
+                RV64Operation::BL(r1, r2, r3) => write!(f, "bl {r1},{r2},.{r3}"),
+            }
+        }
+    }
+
+    pub fn select_instructions(
+        mut cfg: CFG<Operator>,
+        allocation: &HashMap<VReg, RV64Reg>,
+    ) -> CFG<RV64Operation> {
+        use RV64Operation::*;
+        let mut new_bodies: Vec<Vec<RV64Operation>> = vec![Vec::new(); cfg.len()];
+        let exit_label = Rc::clone(&cfg.get_block(cfg.get_exit()).label);
+
+        for (i, block) in cfg.get_blocks_mut().iter_mut().enumerate() {
+            let body = std::mem::take(&mut block.body);
+
+            for op in body {
+                macro_rules! binary_op {
+                    ($x:expr, $y:expr, $z:expr, $p:path) => {{
+                        new_bodies[i].push($p(allocation[&$x], allocation[&$y], allocation[&$z]));
+                    }};
+                }
+                macro_rules! get_regs {
+                    ($($x:expr),+) => {
+                        ($(allocation[&$x]),+)
+                    };
+                }
+                match op {
+                    Operator::Add(x, y, z) => binary_op!(x, y, z, ADD),
+                    Operator::Sub(x, y, z) => binary_op!(x, y, z, SUB),
+                    Operator::Mult(x, y, z) => binary_op!(x, y, z, MUL),
+                    Operator::Div(x, y, z) => binary_op!(x, y, z, DIV),
+                    Operator::And(x, y, z) => binary_op!(x, y, z, AND),
+                    Operator::Or(x, y, z) => binary_op!(x, y, z, OR),
+                    Operator::Mv(x, y) => {
+                        let (x, y) = get_regs!(x, y);
+                        new_bodies[i].push(ADDI(x, y, 0));
+                    }
+                    Operator::Xor(x, y, z) => binary_op!(x, y, z, XOR),
+                    Operator::Load(x, y, z) => {
+                        let (x, y, z) = get_regs!(x, y, z);
+                        new_bodies[i].push(ADD(x, y, z));
+                        new_bodies[i].push(LQ(x, x, 0));
+                    }
+                    Operator::Store(x, y, z) => {
+                        let (x, y, z) = get_regs!(x, y, z);
+                        new_bodies[i].push(ADD(y, y, z));
+                        new_bodies[i].push(SQ(x, y, 0));
+                        new_bodies[i].push(SUB(y, y, z));
+                    }
+                    Operator::La(x, y) => {
+                        let x = get_regs!(x);
+                        new_bodies[i].push(PSEUD_LA(x, y));
+                    }
+                    Operator::Bgt(x, y, z, _) => {
+                        let (x, y) = get_regs!(x, y);
+                        new_bodies[i].push(BGE(x, y, z));
+                    }
+                    Operator::Bl(x, y, z, _) => {
+                        let (x, y) = get_regs!(x, y);
+                        new_bodies[i].push(BL(x, y, z));
+                    }
+                    Operator::J(x) => {
+                        new_bodies[i].push(PSEUD_J(x));
+                    }
+                    Operator::Beq(x, y, z, _) => {
+                        let (x, y) = get_regs!(x, y);
+                        new_bodies[i].push(BEQ(x, y, z));
+                    }
+                    Operator::Li(x, y) => {
+                        let x = get_regs!(x);
+                        new_bodies[i].push(PSEUD_LI(x, y));
+                    }
+                    Operator::Slt(x, y, z) => binary_op!(x, y, z, SLT),
+                    Operator::Call(_, y, z) => {
+                        debug_assert!(z.len() <= 7);
+                        // z already in correct regs due to allocation
+                        new_bodies[i].push(PSEUD_CALL(y));
+                    }
+                    Operator::Return(_) => {
+                        // already in x10
+                        new_bodies[i].push(PSEUD_J(Rc::clone(&exit_label)));
+                    }
+                    Operator::Label(_) => {
+                        #[cfg(debug_assertions)]
+                        unreachable!("label should be excluded in CFG");
+                        #[cfg(not(debug_assertions))]
+                        unsafe {
+                            unreachable_unchecked()
+                        }
+                    }
+                    Operator::GetParameter(_, _) => {
+                        //already in correct reg
+                    }
+                    Operator::StoreLocal(x, y) => {
+                        let x = get_regs!(x);
+                        new_bodies[i].push(SQ(x, RV64Reg::X2, (y * 8) as i16));
+                    }
+                    Operator::LoadLocal(x, y) => {
+                        let x = get_regs!(x);
+                        new_bodies[i].push(LQ(x, RV64Reg::X2, (y * 8) as i16));
+                    }
+                    Operator::Nop => {}
+                }
+            }
+        }
+        let mut new_blocks: Vec<_> = std::mem::take(&mut cfg.blocks)
+            .into_iter()
+            .enumerate()
+            .map(|(i, block)| block.into_other(std::mem::take(&mut new_bodies[i])))
+            .collect();
+        new_blocks[cfg.get_entry()].body.insert(
+            0,
+            SQ(
+                RV64Reg::X1,
+                RV64Reg::X2,
+                (*cfg.get_allocated_ars_mut() as i16) * 8,
+            ),
+        );
+        *cfg.get_allocated_ars_mut() += 1;
+        new_blocks[cfg.get_entry()].body.insert(
+            0,
+            ADDI(
+                RV64Reg::X2,
+                RV64Reg::X2,
+                (*cfg.get_allocated_ars_mut() as i16) * -8,
+            ),
+        );
+        new_blocks[cfg.get_exit()].body.extend([
+            LQ(
+                RV64Reg::X1,
+                RV64Reg::X2,
+                (*cfg.get_allocated_ars_mut() as i16 - 1) * 8,
+            ),
+            ADDI(
+                RV64Reg::X2,
+                RV64Reg::X2,
+                (*cfg.get_allocated_ars_mut() as i16) * 8,
+            ),
+            PSEUD_RET,
+        ]);
+        cfg.into_other(new_blocks)
+    }
+    #[cfg(test)]
+    mod tests {
+        use super::super::register_allocation::*;
+        use crate::ir::{Displayable, CFG};
+
+        #[test]
+        fn select_instructions() {
+            let input = "
+        myvar3 :: Bool = false;
+        lambda myfun(myvar3 :: Int, myvar5 :: Int) :: Int {
+            myvar4 :: Int = 0;
+            i :: Int = 100;
+            while (i >= 0) do {
+                myvar4 = myfun(3, myvar4);
+                i = i - 1;
+            }
+           return myvar4;
+        }
+        myvar2 :: Bool = true;
+        ";
+            let result = crate::parser::parse(&input);
+            assert!(result.1.is_empty());
+            assert!(result.0.is_some());
+            assert!(result.0.as_ref().unwrap().is_ok());
+            let p = result.0.unwrap().unwrap();
+            let res = crate::parser::validate(&p);
+            assert!(res.is_none(), "{}", res.unwrap());
+
+            let mut context = crate::ir::Context::new();
+            crate::ir::translate_program(&mut context, &p);
+            let funs = context.get_functions();
+            let fun = funs.get("myfun").unwrap();
+            let body = fun.get_body();
+
+            let cfg = CFG::from_linear(body, fun.get_params(), fun.get_max_reg());
+            let mut ssa = cfg.to_ssa();
+            crate::ssa::optimization_sequence(&mut ssa).unwrap();
+            conventionalize_ssa(&mut ssa);
+
+            let allocation = RISCV64::allocate(ssa);
+            let native = super::select_instructions(allocation.0, &allocation.1);
+            println!("native allocated: {}", native.to_dot());
+            let linear = native.linearize();
+            println!("linear:\n{}", Displayable(&linear));
+        }
+        #[test]
+        fn select_instructions_fib() {
+            let input = "
+        lambda fib(n :: Int) :: Int {
+            if n < 2 then {
+                return 1;
+            } else {
+                return fib(n - 1) + fib(n - 2);
+            }
+        }
+        ";
+            let result = crate::parser::parse(&input);
+            assert!(result.1.is_empty());
+            assert!(result.0.is_some());
+            assert!(result.0.as_ref().unwrap().is_ok());
+            let p = result.0.unwrap().unwrap();
+            let res = crate::parser::validate(&p);
+            assert!(res.is_none(), "{}", res.unwrap());
+
+            let mut context = crate::ir::Context::new();
+            crate::ir::translate_program(&mut context, &p);
+            let funs = context.get_functions();
+            let fun = funs.get("fib").unwrap();
+            let body = fun.get_body();
+
+            let cfg = CFG::from_linear(body, fun.get_params(), fun.get_max_reg());
+            let mut ssa = cfg.to_ssa();
+            crate::ssa::optimization_sequence(&mut ssa).unwrap();
+            conventionalize_ssa(&mut ssa);
+
+            let allocation = RISCV64::allocate(ssa);
+            let native = super::select_instructions(allocation.0, &allocation.1);
+            println!("native allocated: {}", native.to_dot());
+            let linear = native.linearize();
+            println!("linear:\n{}", Displayable(&linear));
         }
     }
 }
