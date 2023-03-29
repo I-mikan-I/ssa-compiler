@@ -368,6 +368,9 @@ impl<B> Function<B> {
     pub fn get_body(&self) -> &B {
         &self.body
     }
+    pub fn into_body(self) -> B {
+        self.body
+    }
     pub fn get_body_mut(&mut self) -> &mut B {
         &mut self.body
     }
@@ -378,8 +381,30 @@ impl<B> Function<B> {
         self.max_reg
     }
 }
+impl Function<Vec<Operator>> {
+    pub fn into_cfg(self) -> Function<CFG<Operator>> {
+        let mut res = Function {
+            body: CFG::from_linear(&self.body, self.get_params(), self.get_max_reg()),
+            params: self.params,
+            max_reg: 0,
+        };
+        res.max_reg = res.body.get_max_reg();
+        res
+    }
+}
+impl Function<CFG<Operator>> {
+    pub fn into_ssa(self) -> Function<CFG<SSAOperator>> {
+        let mut res = Function {
+            body: self.body.into_ssa(),
+            params: self.params,
+            max_reg: 0,
+        };
+        res.max_reg = res.body.get_max_reg();
+        res
+    }
+}
 pub struct Context<B> {
-    functions: HashMap<String, Function<B>>,
+    pub functions: HashMap<String, Function<B>>,
 }
 impl<B> Context<B> {
     pub fn new() -> Self {
@@ -761,6 +786,7 @@ impl<O> Block<O> {
     }
 }
 #[derive(Debug)]
+#[allow(clippy::upper_case_acronyms)]
 pub struct CFG<O> {
     pub blocks: Vec<Block<O>>,
     entry: usize,
@@ -1303,7 +1329,7 @@ impl CFG<Operator> {
         }
     }
     /// to_ssa transforms the CFG into SSA form.
-    pub fn to_ssa(mut self) -> CFG<SSAOperator> {
+    pub fn into_ssa(mut self) -> CFG<SSAOperator> {
         let frontiers = self.get_dominance_frontiers();
         let (globals, defined_in) = self.get_global_regs();
         let mut phis = vec![vec![]; self.blocks.len()];
@@ -1763,7 +1789,7 @@ mod test {
         #[test]
         fn test_ssa_one_definition(cfg in any_with::<CFG<Operator>>((20, 20, 20))) {
             let dot = cfg.to_dot();
-            let ssa = cfg.to_ssa();
+            let ssa = cfg.into_ssa();
             let ssa_dot = ssa.to_dot();
             let mut defined = HashSet::new();
             for block in ssa.blocks {
@@ -1868,7 +1894,7 @@ mod test {
                 }
                 names.pop();
             }
-            let ssa = cfg.to_ssa();
+            let ssa = cfg.into_ssa();
             let mut names = SheafTable::new();
             check_reaching_recursive(&ssa, &mut names, 0);
         }
@@ -1882,7 +1908,7 @@ mod test {
 
         #[test]
         fn test_ssa_non_critical_edge(cfg in any_with::<CFG<Operator>>((10, 10, 10))) {
-            let ssa = cfg.to_ssa();
+            let ssa = cfg.into_ssa();
 
             for block in &ssa.blocks {
                 if block.children.len() > 1 {

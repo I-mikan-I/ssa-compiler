@@ -1,5 +1,8 @@
 #![allow(dead_code)]
-use std::{error::Error, fmt::{Debug, Display}};
+use std::{
+    error::Error,
+    fmt::{Debug, Display},
+};
 
 pub use self::{
     Atom::*, BTerm::*, CTerm::*, Defs::*, Expr::*, Factor::*, Statement::*, Term::*, Type::*,
@@ -24,6 +27,11 @@ where
 impl Debug for ParseErr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.message)
+    }
+}
+impl Display for ParseErr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        <Self as Debug>::fmt(&self, f)
     }
 }
 impl Display for Type {

@@ -713,7 +713,7 @@ pub mod gvn_pre {
         use std::rc::Rc;
 
         use super::*;
-        use crate::ir::CFG;
+        use crate::{ir::CFG, parser};
 
         #[test]
         fn generate_table() {
@@ -733,14 +733,8 @@ pub mod gvn_pre {
         }
         myvar2 :: Bool = true;
         ";
-            let result = crate::parser::parse(&input);
-            assert!(result.1.is_empty());
-            assert!(result.0.is_some());
-            assert!(result.0.as_ref().unwrap().is_ok());
-            let p = result.0.unwrap().unwrap();
-            let res = crate::parser::validate(&p);
-            assert!(res.is_none(), "{}", res.unwrap());
 
+            let p = parser::parse_and_validate(&input).unwrap();
             let mut context = crate::ir::Context::new();
             crate::ir::translate_program(&mut context, &p);
             let funs = context.get_functions();
@@ -749,7 +743,7 @@ pub mod gvn_pre {
             println!("{}", crate::ir::Displayable(&body[..]));
 
             let cfg = CFG::from_linear(body, fun.get_params(), fun.get_max_reg());
-            let mut ssa = cfg.to_ssa();
+            let mut ssa = cfg.into_ssa();
             let table = generate_value_table(&mut ssa);
 
             for val in [
@@ -779,7 +773,7 @@ pub mod gvn_pre {
             println!("{}", crate::ir::Displayable(&body[..]));
 
             let cfg = CFG::from_linear(body, vec![], 3);
-            let mut ssa = cfg.to_ssa();
+            let mut ssa = cfg.into_ssa();
             let (leaders, antic_in, _, mut table) = build_sets(&mut ssa);
             assert_eq!(leaders.len(), 2);
             let value_3 = table.maybe_insert(Expression::Immediate(3));
@@ -815,7 +809,7 @@ pub mod gvn_pre {
             println!("{}", crate::ir::Displayable(&body[..]));
 
             let cfg = CFG::from_linear(body, vec![], 3);
-            let mut ssa = cfg.to_ssa();
+            let mut ssa = cfg.into_ssa();
             let (leaders, antic_in, _, mut table) = build_sets(&mut ssa);
             assert_eq!(leaders.len(), 3);
             assert_eq!(antic_in.len(), 3);
@@ -872,7 +866,7 @@ pub mod gvn_pre {
             println!("{}", crate::ir::Displayable(&body[..]));
 
             let cfg = CFG::from_linear(body, vec![], 3);
-            let mut ssa = cfg.to_ssa();
+            let mut ssa = cfg.into_ssa();
             let (leaders, antic_in, _, mut table) = build_sets(&mut ssa);
             assert_eq!(leaders.len(), 3);
             assert_eq!(antic_in.len(), 3);
@@ -925,7 +919,7 @@ pub mod gvn_pre {
             println!("{}", crate::ir::Displayable(&body[..]));
 
             let cfg = CFG::from_linear(body, vec![], 6);
-            let mut ssa = cfg.to_ssa();
+            let mut ssa = cfg.into_ssa();
             let (leaders, antic_in, _, mut table) = build_sets(&mut ssa);
             assert_eq!(leaders.len(), 3);
             assert_eq!(antic_in.len(), 3);
@@ -986,7 +980,7 @@ pub mod gvn_pre {
             println!("{}", crate::ir::Displayable(&body[..]));
 
             let cfg = CFG::from_linear(body, vec![], 5);
-            let mut ssa = cfg.to_ssa();
+            let mut ssa = cfg.into_ssa();
             let (leaders, antic_in, _, mut table) = build_sets(&mut ssa);
             assert_eq!(leaders.len(), 4);
             assert_eq!(antic_in.len(), 4);
@@ -1068,7 +1062,7 @@ pub mod gvn_pre {
             println!("{}", crate::ir::Displayable(&body[..]));
 
             let cfg = CFG::from_linear(body, vec![], 5);
-            let mut ssa = cfg.to_ssa();
+            let mut ssa = cfg.into_ssa();
             let (leaders, antic_in, _, mut table) = build_sets(&mut ssa);
             assert_eq!(leaders.len(), 6);
             assert_eq!(antic_in.len(), 6);
@@ -1167,7 +1161,7 @@ pub mod gvn_pre {
             println!("{}", crate::ir::Displayable(&body[..]));
 
             let cfg = CFG::from_linear(body, vec![], 5);
-            let mut ssa = cfg.to_ssa();
+            let mut ssa = cfg.into_ssa();
             let (leaders, antic_in, _, mut table) = build_sets(&mut ssa);
             assert_eq!(leaders.len(), 6);
             assert_eq!(antic_in.len(), 6);
@@ -1288,7 +1282,7 @@ pub mod gvn_pre {
             println!("{}", crate::ir::Displayable(&body[..]));
 
             let cfg = CFG::from_linear(body, vec![], 8);
-            let mut ssa = cfg.to_ssa();
+            let mut ssa = cfg.into_ssa();
             let (mut leaders, antic_in, phi_gen, mut table) = build_sets(&mut ssa);
             println!("Before insert: \n {}", ssa.to_dot());
             insert(&mut ssa, &mut leaders, &antic_in, &phi_gen, &mut table);
@@ -1326,7 +1320,7 @@ pub mod gvn_pre {
             println!("{}", crate::ir::Displayable(&body[..]));
 
             let cfg = CFG::from_linear(body, vec![], 8);
-            let mut ssa = cfg.to_ssa();
+            let mut ssa = cfg.into_ssa();
             let (mut leaders, antic_in, phi_gen, mut table) = build_sets(&mut ssa);
             println!("Before insert: \n {}", ssa.to_dot());
             insert(&mut ssa, &mut leaders, &antic_in, &phi_gen, &mut table);
@@ -1633,7 +1627,7 @@ pub mod copy_propagation {
             println!("{}", crate::ir::Displayable(&body[..]));
 
             let cfg = CFG::from_linear(body, vec![], 8);
-            let mut ssa = cfg.to_ssa();
+            let mut ssa = cfg.into_ssa();
             println!("Before GVN-PRE: \n{}", ssa.to_dot());
             gvn_pre::optimize(&mut ssa);
             println!("After GVN-PRE: \n{}", ssa.to_dot());
@@ -1672,7 +1666,7 @@ pub mod copy_propagation {
             println!("{}", crate::ir::Displayable(&body[..]));
 
             let cfg = CFG::from_linear(body, vec![], 8);
-            let mut ssa = cfg.to_ssa();
+            let mut ssa = cfg.into_ssa();
             println!("Before GVN-PRE: \n{}", ssa.to_dot());
             gvn_pre::optimize(&mut ssa);
             println!("After GVN-PRE: \n{}", ssa.to_dot());
@@ -1691,7 +1685,10 @@ pub mod copy_propagation {
 
 #[cfg(test)]
 mod tests {
-    use crate::ir::{Operator, SSAOperator, CFG};
+    use crate::{
+        ir::{Operator, SSAOperator, CFG},
+        parser,
+    };
 
     #[test]
     fn optimize_with_call() {
@@ -1708,14 +1705,7 @@ mod tests {
         }
         myvar2 :: Bool = true;
         ";
-        let result = crate::parser::parse(&input);
-        assert!(result.1.is_empty());
-        assert!(result.0.is_some());
-        assert!(result.0.as_ref().unwrap().is_ok());
-        let p = result.0.unwrap().unwrap();
-        let res = crate::parser::validate(&p);
-        assert!(res.is_none(), "{}", res.unwrap());
-
+        let p = parser::parse_and_validate(&input).unwrap();
         let mut context = crate::ir::Context::new();
         crate::ir::translate_program(&mut context, &p);
         let funs = context.get_functions();
@@ -1723,7 +1713,7 @@ mod tests {
         let body = fun.get_body();
 
         let cfg = CFG::from_linear(body, fun.get_params(), fun.get_max_reg());
-        let mut ssa = cfg.to_ssa();
+        let mut ssa = cfg.into_ssa();
         super::gvn_pre::optimize(&mut ssa);
         assert!(ssa
             .get_blocks()

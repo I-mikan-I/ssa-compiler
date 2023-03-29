@@ -11,7 +11,7 @@ use crate::util::SheafTable;
 lrlex_mod!("language.l");
 lrpar_mod!("language.y");
 
-pub fn validate(program: &parser_defs::Program) -> Option<Box<dyn Error>> {
+fn validate(program: &parser_defs::Program) -> Option<Box<dyn Error>> {
     let mut sheaf = SheafTable::new();
     resolution(parser_defs::Any::PR(program), &mut sheaf).err()
 }
@@ -254,10 +254,32 @@ type GRMResult<V, E> = (
     Option<Result<V, E>>,
     Vec<LexParseError<u32, DefaultLexerTypes>>,
 );
-pub fn parse(s: &str) -> GRMResult<Program, ParseErr> {
+
+fn parse(s: &str) -> GRMResult<Program, ParseErr> {
     let lexerdef = language_l::lexerdef();
     let lexer = lexerdef.lexer(s);
     language_y::parse(&lexer)
+}
+
+pub fn parse_and_validate(s: &str) -> Result<Program, Box<dyn std::error::Error>> {
+    let (res, errors) = parse(s);
+    let mut err_str = String::new();
+    for err in errors.iter() {
+        err_str.push_str(&err.pp(&language_l::lexerdef().lexer(s), &language_y::token_epp));
+    }
+    if !errors.is_empty() {
+        return Err(err_str.into());
+    }
+    let program_unverified = match res {
+        Some(Ok(p)) => p,
+        Some(Err(e)) => return Err(format!("parse error: {}", e).into()),
+        None => return Err("unknown parse error".into()),
+    };
+    let res = validate(&program_unverified);
+    if let Some(err) = res {
+        return Err(format!("type/resolution/binding error: {err}").into());
+    }
+    Ok(program_unverified)
 }
 
 #[cfg(test)]
@@ -301,7 +323,7 @@ mod tests {
         };
     }
 
-    expect_correct!("examples", correct2, example, fibb, recurse, correct3);
+    expect_correct!("examples", correct2, example, fibb, recurse, correct3, correct4);
     expect_wrong_semantics!(
         "examples",
         wrong1,

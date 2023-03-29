@@ -1,14 +1,112 @@
 #![allow(dead_code)]
-pub mod backend;
-pub mod ir;
-pub mod parser;
-pub mod ssa;
-pub mod util;
+mod backend;
+mod ir;
+mod parser;
+mod ssa;
+mod util;
+
+use std::{collections::HashMap, error::Error, path::PathBuf};
+
+use clap::Parser;
+
+const TEMP_DIR: &str = "build";
+#[derive(Parser, Debug)]
+#[command(author, version, about)]
+struct Args {
+    input_files: Vec<PathBuf>,
+    #[arg(short = 'o', long = "output")]
+    output_file: PathBuf,
+    #[arg(short = 'g', long, default_value_t = false)]
+    no_optimize: bool,
+}
+
+pub fn lib_main() {
+    let args = Args::parse();
+    if let Err(e) = { validate_input(&args.input_files) } {
+        eprintln!("Error during argument validation: {}", e);
+        return;
+    }
+    let strings = args
+        .input_files
+        .iter()
+        .map(std::fs::read_to_string)
+        .map(|res| {
+            res.map_err(|e| -> Box<dyn Error> {
+                format!("cannot read from input file: {e}").into()
+            })
+        })
+        .collect::<Result<Vec<_>, _>>();
+    if let Err(e) = strings {
+        eprintln!("Error during parsing: {e}");
+        return;
+    }
+    let strings = strings.unwrap();
+
+    let parsed: Result<Vec<_>, _> = strings
+        .iter()
+        .map(|s| parser::parse_and_validate(s))
+        .collect();
+    if let Err(e) = parsed {
+        eprintln!("Error during parsing: {e}");
+        return;
+    }
+    let linearized: Vec<_> = parsed
+        .unwrap()
+        .into_iter()
+        .map(|p| {
+            let mut ctx = ir::Context::default();
+            ir::translate_program(&mut ctx, &p);
+            ctx
+        })
+        .collect();
+    let funs_iter = linearized
+        .into_iter()
+        .flat_map(|ctx| ctx.functions.into_iter());
+    let mut funs = HashMap::new();
+    for (name, fun) in funs_iter {
+        if funs.contains_key(&name) {
+            eprintln!("Two functions with conflicting names {name}");
+            return;
+        }
+        funs.insert(name, fun.into_cfg().into_ssa());
+    }
+
+    for v in funs.values_mut() {
+        if !args.no_optimize {
+            ssa::optimization_sequence(v.get_body_mut())
+                .unwrap_or_else(|_| panic!("Bug found, please open an issue"));
+        }
+    }
+    let funs = funs.into_iter().map(|(k, v)| {
+        let v = backend::to_assembly(v.into_body(), &k);
+        (k, v)
+    });
+    for (name, body) in funs {
+        let out_path = format!("{TEMP_DIR}/{name}.s");
+        let res = std::fs::write(&out_path, body);
+        if let Err(e) = res {
+            eprintln!("Error writing output file: {out_path}\n{e}");
+            return;
+        }
+    }
+}
+
+fn validate_input(input: &[PathBuf]) -> Result<(), Box<dyn std::error::Error>> {
+    for input in input {
+        if !input.is_file() {
+            return Err(format!(
+                "input {} is not a valid file",
+                input.to_str().unwrap_or("INVALID_UTF8")
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {
     use super::ir::*;
-    use super::parser::*;
 
     #[test]
     fn test_ir() {
@@ -25,13 +123,8 @@ mod tests {
         }
         myvar2 :: Bool = true;
         ";
-        let result = parse(&input);
-        assert!(result.1.is_empty());
-        assert!(result.0.is_some());
-        assert!(result.0.as_ref().unwrap().is_ok());
-        let p = result.0.unwrap().unwrap();
-        let res = validate(&p);
-        assert!(res.is_none(), "{}", res.unwrap());
+
+        let p = super::parser::parse_and_validate(&input).unwrap();
 
         let mut context = Context::new();
         translate_program(&mut context, &p);
@@ -88,14 +181,8 @@ mod tests {
         }
         myvar2 :: Bool = true;
         ";
-        let result = parse(&input);
-        assert!(result.1.is_empty());
-        assert!(result.0.is_some());
-        assert!(result.0.as_ref().unwrap().is_ok());
-        let p = result.0.unwrap().unwrap();
-        let res = validate(&p);
-        assert!(res.is_none(), "{}", res.unwrap());
 
+        let p = super::parser::parse_and_validate(&input).unwrap();
         let mut context = Context::new();
         translate_program(&mut context, &p);
         let funs = context.get_functions();
@@ -184,7 +271,7 @@ mod tests {
         assert_eq!(cfg.get_block(6).idom.unwrap(), 1);
         assert_eq!(cfg.get_block(7).children, vec![]);
         assert_eq!(cfg.get_block(7).idom.unwrap(), 6);
-        cfg.to_ssa();
+        cfg.into_ssa();
     }
 
     #[test]
@@ -194,14 +281,8 @@ mod tests {
 
         }
         ";
-        let result = parse(&input);
-        assert!(result.1.is_empty());
-        assert!(result.0.is_some());
-        assert!(result.0.as_ref().unwrap().is_ok());
-        let p = result.0.unwrap().unwrap();
-        let res = validate(&p);
-        assert!(res.is_none(), "{}", res.unwrap());
 
+        let p = super::parser::parse_and_validate(&input).unwrap();
         let mut context = Context::new();
         translate_program(&mut context, &p);
         let funs = context.get_functions();

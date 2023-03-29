@@ -10,6 +10,7 @@ cfgrammar = "0.13.1"
 lrlex = "0.13.1"
 lrpar = "0.13.1"
 z3 = {version="0.11.2", features = ["static-link-z3"]}
+clap = { version = "4.2.0", features = ["derive"] }
 
 [dependencies.parser_defs]
 path = "parser"

@@ -1,4 +1,23 @@
-pub mod register_allocation {
+use crate::ir::{Displayable, SSAOperator, CFG};
+use register_allocation::Allocator;
+
+pub fn to_assembly(mut cfg: CFG<SSAOperator>, fun_name: &str) -> String {
+    register_allocation::conventionalize_ssa(&mut cfg);
+
+    let (mut cfg, coloring) = register_allocation::RISCV64::allocate(cfg);
+    register_allocation::RISCV64::add_procedure_prologues(&mut cfg, &coloring);
+
+    let native = instruction_selection::select_instructions(cfg, &coloring);
+    let linear = native.linearize();
+    format!(
+        ".attribute arch, \"rv64im\"
+.globl {fun_name}
+{fun_name}:
+{}",
+        Displayable(&linear)
+    )
+}
+mod register_allocation {
     use std::cmp::max_by_key;
     use std::collections::{HashMap, HashSet};
     use std::fmt::Display;
@@ -886,6 +905,7 @@ strict graph G {{
         use crate::{
             backend::register_allocation::{Allocator, RV64Reg},
             ir::{Operator, CFG},
+            parser,
         };
 
         #[test]
@@ -907,14 +927,7 @@ strict graph G {{
         }
         myvar2 :: Bool = true;
         ";
-            let result = crate::parser::parse(&input);
-            assert!(result.1.is_empty());
-            assert!(result.0.is_some());
-            assert!(result.0.as_ref().unwrap().is_ok());
-            let p = result.0.unwrap().unwrap();
-            let res = crate::parser::validate(&p);
-            assert!(res.is_none(), "{}", res.unwrap());
-
+            let p = parser::parse_and_validate(&input).unwrap();
             let mut context = crate::ir::Context::new();
             crate::ir::translate_program(&mut context, &p);
             let funs = context.get_functions();
@@ -923,7 +936,7 @@ strict graph G {{
             println!("{}", crate::ir::Displayable(&body[..]));
 
             let cfg = CFG::from_linear(body, fun.get_params(), fun.get_max_reg());
-            let mut ssa = cfg.to_ssa();
+            let mut ssa = cfg.into_ssa();
             crate::ssa::optimization_sequence(&mut ssa).unwrap();
             super::conventionalize_ssa(&mut ssa);
 
@@ -959,14 +972,7 @@ strict graph G {{
         }
         myvar2 :: Bool = true;
         ";
-            let result = crate::parser::parse(&input);
-            assert!(result.1.is_empty());
-            assert!(result.0.is_some());
-            assert!(result.0.as_ref().unwrap().is_ok());
-            let p = result.0.unwrap().unwrap();
-            let res = crate::parser::validate(&p);
-            assert!(res.is_none(), "{}", res.unwrap());
-
+            let p = parser::parse_and_validate(&input).unwrap();
             let mut context = crate::ir::Context::new();
             crate::ir::translate_program(&mut context, &p);
             let funs = context.get_functions();
@@ -974,7 +980,7 @@ strict graph G {{
             let body = fun.get_body();
 
             let cfg = CFG::from_linear(body, fun.get_params(), fun.get_max_reg());
-            let mut ssa = cfg.to_ssa();
+            let mut ssa = cfg.into_ssa();
             crate::ssa::optimization_sequence(&mut ssa).unwrap();
             super::conventionalize_ssa(&mut ssa);
 
@@ -997,14 +1003,7 @@ strict graph G {{
         }
         myvar2 :: Bool = true;
         ";
-            let result = crate::parser::parse(&input);
-            assert!(result.1.is_empty());
-            assert!(result.0.is_some());
-            assert!(result.0.as_ref().unwrap().is_ok());
-            let p = result.0.unwrap().unwrap();
-            let res = crate::parser::validate(&p);
-            assert!(res.is_none(), "{}", res.unwrap());
-
+            let p = parser::parse_and_validate(&input).unwrap();
             let mut context = crate::ir::Context::new();
             crate::ir::translate_program(&mut context, &p);
             let funs = context.get_functions();
@@ -1012,7 +1011,7 @@ strict graph G {{
             let body = fun.get_body();
 
             let cfg = CFG::from_linear(body, fun.get_params(), fun.get_max_reg());
-            let mut ssa = cfg.to_ssa();
+            let mut ssa = cfg.into_ssa();
             crate::ssa::optimization_sequence(&mut ssa).unwrap();
             super::conventionalize_ssa(&mut ssa);
 
@@ -1044,14 +1043,8 @@ strict graph G {{
         }
         myvar2 :: Bool = true;
         ";
-            let result = crate::parser::parse(&input);
-            assert!(result.1.is_empty());
-            assert!(result.0.is_some());
-            assert!(result.0.as_ref().unwrap().is_ok());
-            let p = result.0.unwrap().unwrap();
-            let res = crate::parser::validate(&p);
-            assert!(res.is_none(), "{}", res.unwrap());
 
+            let p = parser::parse_and_validate(&input).unwrap();
             let mut context = crate::ir::Context::new();
             crate::ir::translate_program(&mut context, &p);
             let funs = context.get_functions();
@@ -1059,7 +1052,7 @@ strict graph G {{
             let body = fun.get_body();
 
             let cfg = CFG::from_linear(body, fun.get_params(), fun.get_max_reg());
-            let mut ssa = cfg.to_ssa();
+            let mut ssa = cfg.into_ssa();
             crate::ssa::optimization_sequence(&mut ssa).unwrap();
             super::conventionalize_ssa(&mut ssa);
 
@@ -1094,14 +1087,8 @@ strict graph G {{
         }
         myvar2 :: Bool = true;
         ";
-            let result = crate::parser::parse(&input);
-            assert!(result.1.is_empty());
-            assert!(result.0.is_some());
-            assert!(result.0.as_ref().unwrap().is_ok());
-            let p = result.0.unwrap().unwrap();
-            let res = crate::parser::validate(&p);
-            assert!(res.is_none(), "{}", res.unwrap());
 
+            let p = parser::parse_and_validate(&input).unwrap();
             let mut context = crate::ir::Context::new();
             crate::ir::translate_program(&mut context, &p);
             let funs = context.get_functions();
@@ -1109,7 +1096,7 @@ strict graph G {{
             let body = fun.get_body();
 
             let cfg = CFG::from_linear(body, fun.get_params(), fun.get_max_reg());
-            let mut ssa = cfg.to_ssa();
+            let mut ssa = cfg.into_ssa();
             crate::ssa::optimization_sequence(&mut ssa).unwrap();
             super::conventionalize_ssa(&mut ssa);
 
@@ -1124,7 +1111,7 @@ strict graph G {{
     }
 }
 
-pub mod instruction_selection {
+mod instruction_selection {
     use std::{
         collections::{HashMap, HashSet, VecDeque},
         fmt::Display,
@@ -1135,7 +1122,7 @@ pub mod instruction_selection {
 
     use super::register_allocation::RV64Reg;
     #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-    #[allow(non_camel_case_types)]
+    #[allow(non_camel_case_types, clippy::upper_case_acronyms)]
     pub enum RV64Operation {
         ADD(RV64Reg, RV64Reg, RV64Reg),
         ADDI(RV64Reg, RV64Reg, i16),
@@ -1160,7 +1147,7 @@ pub mod instruction_selection {
     }
 
     impl CFG<RV64Operation> {
-        fn linearize(self) -> Vec<RV64Operation> {
+        pub fn linearize(self) -> Vec<RV64Operation> {
             let mut placed = HashSet::new();
             let mut worklist = VecDeque::new();
             worklist.push_back(self.get_block(self.get_entry()));
@@ -1374,7 +1361,10 @@ pub mod instruction_selection {
     #[cfg(test)]
     mod tests {
         use super::super::register_allocation::*;
-        use crate::ir::{Displayable, CFG};
+        use crate::{
+            ir::{Displayable, CFG},
+            parser,
+        };
 
         #[test]
         fn select_instructions() {
@@ -1391,14 +1381,7 @@ pub mod instruction_selection {
         }
         myvar2 :: Bool = true;
         ";
-            let result = crate::parser::parse(&input);
-            assert!(result.1.is_empty());
-            assert!(result.0.is_some());
-            assert!(result.0.as_ref().unwrap().is_ok());
-            let p = result.0.unwrap().unwrap();
-            let res = crate::parser::validate(&p);
-            assert!(res.is_none(), "{}", res.unwrap());
-
+            let p = parser::parse_and_validate(&input).unwrap();
             let mut context = crate::ir::Context::new();
             crate::ir::translate_program(&mut context, &p);
             let funs = context.get_functions();
@@ -1406,7 +1389,7 @@ pub mod instruction_selection {
             let body = fun.get_body();
 
             let cfg = CFG::from_linear(body, fun.get_params(), fun.get_max_reg());
-            let mut ssa = cfg.to_ssa();
+            let mut ssa = cfg.into_ssa();
             crate::ssa::optimization_sequence(&mut ssa).unwrap();
             conventionalize_ssa(&mut ssa);
 
@@ -1428,14 +1411,7 @@ pub mod instruction_selection {
             }
         }
         ";
-            let result = crate::parser::parse(&input);
-            assert!(result.1.is_empty());
-            assert!(result.0.is_some());
-            assert!(result.0.as_ref().unwrap().is_ok());
-            let p = result.0.unwrap().unwrap();
-            let res = crate::parser::validate(&p);
-            assert!(res.is_none(), "{}", res.unwrap());
-
+            let p = parser::parse_and_validate(&input).unwrap();
             let mut context = crate::ir::Context::new();
             crate::ir::translate_program(&mut context, &p);
             let funs = context.get_functions();
@@ -1443,7 +1419,7 @@ pub mod instruction_selection {
             let body = fun.get_body();
 
             let cfg = CFG::from_linear(body, fun.get_params(), fun.get_max_reg());
-            let mut ssa = cfg.to_ssa();
+            let mut ssa = cfg.into_ssa();
             crate::ssa::optimization_sequence(&mut ssa).unwrap();
             conventionalize_ssa(&mut ssa);
 
