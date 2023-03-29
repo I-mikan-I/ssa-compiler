@@ -1124,9 +1124,10 @@ impl CFG<Operator> {
         let mut blocks: Vec<Block<_>> = blocks
             .into_iter()
             .enumerate()
-            .map(|(new, (old, b))| {
+            .map(|(new, (old, mut b))| {
                 gc_map[old] = new;
                 debug_assert_ne!(new, usize::MAX);
+                b.preds.retain(|pred| !pruned.contains(pred));
                 b
             })
             .collect();

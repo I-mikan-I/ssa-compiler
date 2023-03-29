@@ -1403,13 +1403,12 @@ mod instruction_selection {
         #[test]
         fn select_instructions_fib() {
             let input = "
-        lambda fib(n :: Int) :: Int {
-            if n < 2 then {
-                return 1;
-            } else {
-                return fib(n - 1) + fib(n - 2);
-            }
-        }
+lambda fib(n :: Int) :: Int {
+    if n < 2 then {
+        return n;
+    } else {}
+    return fib(n - 2) + fib(n - 1);
+}
         ";
             let p = parser::parse_and_validate(&input).unwrap();
             let mut context = crate::ir::Context::new();
