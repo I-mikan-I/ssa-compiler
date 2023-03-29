@@ -1,4 +1,5 @@
 pub mod register_allocation {
+    use std::cmp::max_by_key;
     use std::collections::{HashMap, HashSet};
     use std::fmt::Display;
 
@@ -123,6 +124,7 @@ pub mod register_allocation {
             Self::X27,
         ];
         fn callee_saved(&self) -> bool {
+            #[allow(clippy::match_like_matches_macro)]
             match self {
                 RV64Reg::X8
                 | RV64Reg::X9
@@ -453,13 +455,23 @@ strict graph G {{
         }
         cfg.set_max_reg(gen.next_reg());
     }
-    fn build_interference_graph(cfg: &CFG<Operator>) -> (InterferenceGraph, HashSet<(VReg, VReg)>) {
+    fn build_interference_graph(
+        cfg: &CFG<Operator>,
+    ) -> (
+        InterferenceGraph,
+        HashSet<(VReg, VReg)>,
+        HashMap<VReg, usize>,
+    ) {
         let mut graph = InterferenceGraph::new();
         let mut coalescable = HashSet::new();
+        let mut spill_weights = HashMap::new();
         let live_out = cfg.live_out();
         for (i, block) in cfg.get_blocks().iter().enumerate() {
             let mut live_now = live_out[i].clone();
             for op in block.body.iter().rev() {
+                for &live in &live_now {
+                    *spill_weights.entry(live).or_insert(0_usize) += 1;
+                }
                 if let Some(rec) = op.receiver() {
                     live_now.remove(&rec);
                     if let Operator::Mv(lr1, lr2) = op {
@@ -475,7 +487,7 @@ strict graph G {{
                 live_now.extend(op.dependencies());
             }
         }
-        (graph, coalescable)
+        (graph, coalescable, spill_weights)
     }
     /// no critical edges allowed
     pub fn conventionalize_ssa(ssa: &mut CFG<SSAOperator>) {
@@ -612,59 +624,87 @@ strict graph G {{
         //todo refactor some general fns out of RV64
         fn pin_liveranges(cfg: &mut CFG<Operator>) -> (HashMap<VReg, RV64Reg>, bool) {
             let mut spilled = false;
-            loop {
-                let mut res = HashMap::new();
-                let mut spill = None;
-                for block in cfg.get_blocks() {
-                    for op in block.body.iter() {
-                        match op {
-                            Operator::GetParameter(x, n) => {
-                                let pin = RV64Reg::get_param_reg(*n).unwrap();
-                                if res.contains_key(x) && res.get(x) != Some(&pin) {
-                                    spill = Some(*x);
-                                    break;
+            let mut gen = VRegGenerator::starting_at_reg(cfg.get_max_reg());
+            let mut res = HashMap::new();
+            for block in cfg.get_blocks_mut() {
+                let mut i = 0;
+                while i < block.body.len() {
+                    match &mut block.body[i] {
+                        Operator::GetParameter(x, n) => {
+                            let pin = RV64Reg::get_param_reg(*n).unwrap();
+                            if let Some(pinned) = res.get(x) {
+                                if pinned != &pin {
+                                    spilled = true;
+                                    let next = gen.next_reg();
+                                    let old = *x;
+                                    *x = next;
+                                    block.body.insert(i + 1, Operator::Mv(old, next));
+                                    res.insert(next, pin);
                                 }
+                            } else {
                                 res.insert(*x, pin);
-                                // todo add support for params > n
                             }
-                            Operator::Call(rec, _, ops) => {
-                                let pin = RV64Reg::get_param_reg(0).unwrap();
-                                if res.contains_key(rec) && res.get(rec) != Some(&pin) {
-                                    spill = Some(*rec);
-                                    break;
+                        }
+                        Operator::Call(rec, _, ops) => {
+                            let pin = RV64Reg::get_param_reg(0).unwrap();
+                            let mut post = None;
+                            let mut before = None;
+                            if let Some(pinned) = res.get(rec) {
+                                if pinned != &pin {
+                                    spilled = true;
+                                    let next = gen.next_reg();
+                                    let old = *rec;
+                                    *rec = next;
+                                    post = Some(Operator::Mv(old, next));
+                                    res.insert(next, pin);
                                 }
+                            } else {
                                 res.insert(*rec, pin);
-                                for (i, op) in ops.iter().enumerate() {
-                                    let pin = RV64Reg::get_param_reg(i as u64).unwrap();
-                                    if res.contains_key(op) && res.get(op) != Some(&pin) {
-                                        spill = Some(*op);
-                                        break;
+                            }
+                            for (i, op) in ops.iter_mut().enumerate() {
+                                let pin = RV64Reg::get_param_reg(i as u64).unwrap();
+                                if let Some(pinned) = res.get(op) {
+                                    if pinned != &pin {
+                                        spilled = true;
+                                        let next = gen.next_reg();
+                                        let old = *op;
+                                        *op = next;
+                                        before = Some(Operator::Mv(next, old));
+                                        res.insert(next, pin);
                                     }
+                                } else {
                                     res.insert(*op, pin);
                                 }
                             }
-                            Operator::Return(op) => {
-                                let pin = RV64Reg::get_param_reg(0).unwrap();
-                                if res.contains_key(op) && res.get(op) != Some(&pin) {
-                                    spill = Some(*op);
-                                    break;
+                            if let Some(operation) = post {
+                                block.body.insert(i + 1, operation)
+                            }
+                            if let Some(operation) = before {
+                                block.body.insert(i, operation)
+                            }
+                        }
+                        Operator::Return(op) => {
+                            let pin = RV64Reg::get_param_reg(0).unwrap();
+                            if let Some(pinned) = res.get(op) {
+                                if pinned != &pin {
+                                    spilled = true;
+                                    let next = gen.next_reg();
+                                    let old = *op;
+                                    *op = next;
+                                    block.body.insert(i + 1, Operator::Mv(old, next));
+                                    res.insert(next, pin);
                                 }
+                            } else {
                                 res.insert(*op, pin);
                             }
-                            _ => {}
                         }
+                        _ => {}
                     }
-                }
-                if let Some(lr) = spill {
-                    spilled = true;
-                    let ar_offset = *cfg.get_allocated_ars_mut();
-                    spill_liverange(cfg, lr, ar_offset);
-                    *cfg.get_allocated_ars_mut() += 1;
-                    continue;
-                } else {
-                    return (res, spilled);
+                    i += 1;
                 }
             }
+            cfg.set_max_reg(gen.next_reg());
+            (res, spilled)
         }
     }
 
@@ -673,7 +713,7 @@ strict graph G {{
             let mut lr_cfg = rewrite_liveranges(ssa);
 
             let (graph, coloring) = 'build_allocate: loop {
-                let (mut graph, coalescable) = build_interference_graph(&lr_cfg);
+                let (mut graph, coalescable, mut spill_weights) = build_interference_graph(&lr_cfg);
                 // coalesce build loop
                 for (lr1, lr2) in coalescable.into_iter() {
                     if graph.check_edge(&lr1, &lr2) {
@@ -709,10 +749,28 @@ strict graph G {{
                 }
                 let (pins, rebuild_graph) = RISCV64::pin_liveranges(&mut lr_cfg);
                 if rebuild_graph {
-                    continue 'build_allocate;
+                    (graph, _, spill_weights) = build_interference_graph(&lr_cfg);
                 }
                 for lr in pins.keys() {
                     graph.maybe_insert(*lr);
+                }
+                for (reg1, value1) in &pins {
+                    for (reg2, value2) in &pins {
+                        if value1 == value2
+                            && graph
+                                .get(reg1)
+                                .and_then(|n1| {
+                                    graph.index.get(reg2).map(|i2| n1.edge_with.contains(i2))
+                                })
+                                .unwrap_or(false)
+                        {
+                            let ar = *lr_cfg.get_allocated_ars_mut();
+                            let to_spill = max_by_key(reg1, reg2, |&t| spill_weights[t]);
+                            spill_liverange(&mut lr_cfg, *to_spill, ar);
+                            *lr_cfg.get_allocated_ars_mut() += 1;
+                            continue 'build_allocate;
+                        }
+                    }
                 }
                 match graph.find_coloring(&pins) {
                     Err(_) => {
@@ -720,7 +778,7 @@ strict graph G {{
                         let lr_to_spill = graph
                             .nodes
                             .iter()
-                            .max_by_key(|node| node.edge_with.len())
+                            .max_by_key(|node| spill_weights[&node.live_range])
                             .unwrap()
                             .live_range;
                         let ar = *lr_cfg.get_allocated_ars_mut();
@@ -796,7 +854,11 @@ strict graph G {{
                         })
                         .collect();
                     prologue.append(&mut block.body);
+                    let jump = prologue.pop();
                     prologue.append(&mut epilogue);
+                    if let Some(op) = jump {
+                        prologue.push(op)
+                    }
                     block.body = prologue;
                     ar_max = std::cmp::max(ar_max, ar_);
                 }
@@ -867,7 +929,7 @@ strict graph G {{
 
             let cfg = super::rewrite_liveranges(ssa);
             println!("live ranges: {}", cfg.to_dot());
-            let (graph, _) = super::build_interference_graph(&cfg);
+            let (graph, _, _) = super::build_interference_graph(&cfg);
 
             println!("{}", graph.to_dot());
 
@@ -1348,7 +1410,8 @@ pub mod instruction_selection {
             crate::ssa::optimization_sequence(&mut ssa).unwrap();
             conventionalize_ssa(&mut ssa);
 
-            let allocation = RISCV64::allocate(ssa);
+            let mut allocation = RISCV64::allocate(ssa);
+            RISCV64::add_procedure_prologues(&mut allocation.0, &allocation.1);
             let native = super::select_instructions(allocation.0, &allocation.1);
             println!("native allocated: {}", native.to_dot());
             let linear = native.linearize();
@@ -1384,7 +1447,8 @@ pub mod instruction_selection {
             crate::ssa::optimization_sequence(&mut ssa).unwrap();
             conventionalize_ssa(&mut ssa);
 
-            let allocation = RISCV64::allocate(ssa);
+            let mut allocation = RISCV64::allocate(ssa);
+            RISCV64::add_procedure_prologues(&mut allocation.0, &allocation.1);
             let native = super::select_instructions(allocation.0, &allocation.1);
             println!("native allocated: {}", native.to_dot());
             let linear = native.linearize();
