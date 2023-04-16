@@ -13,7 +13,7 @@ pkgs.callPackage (
     {mkShell}:
     mkShell {
         buildInputs = [ pkgs.llvmPackages.libclang pkgs.stdenv z3.dev];
-        nativeBuildInputs = [ pkgs.cmake pkgs.clang pkgs.stdenv rv64.clang ];
+        nativeBuildInputs = [ pkgs.cmake pkgs.clang pkgs.stdenv pkgs.clang ];
         shellHook = "
             export LIBCLANG_PATH=${pkgs.llvmPackages.libclang.lib}/lib
         ";

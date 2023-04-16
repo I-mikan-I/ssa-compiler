@@ -362,13 +362,17 @@ strict graph G {{
 }}"
             )
         }
-        fn find_coloring<R: RegisterSet>(&self, pins: &HashMap<VReg, R>) -> Result<Vec<R>, ()> {
+        fn find_coloring<R: RegisterSet>(
+            &self,
+            pins: &HashMap<VReg, R>,
+            coalescable: HashSet<(VReg, VReg)>,
+        ) -> Result<(Vec<R>, HashSet<(VReg, VReg)>), ()> {
             use z3::ast::*;
             let max_colors = R::max_regs();
             let mut config = z3::Config::new();
             config.set_model_generation(true);
             let context = z3::Context::new(&config);
-            let solver = z3::Solver::new(&context);
+            let solver = z3::Optimize::new(&context);
 
             let nodes_z3 = self
                 .nodes
@@ -401,6 +405,32 @@ strict graph G {{
                 }
             }
 
+            let coalescable_vec: Vec<_> = coalescable.into_iter().collect();
+
+            let coalescable_bools: Vec<_> = (0..coalescable_vec.len())
+                .map(|i| Int::new_const(&context, format!("coales_bool_{i}")))
+                .collect();
+            for (i, bool) in coalescable_bools.iter().enumerate() {
+                let lr1 = &nodes_z3[self.index[&coalescable_vec[i].0]];
+                let lr2 = &nodes_z3[self.index[&coalescable_vec[i].1]];
+                solver.assert(
+                    &bool
+                        ._safe_eq(&Int::from_u64(&context, 1))
+                        .unwrap()
+                        .implies(&lr1._eq(&lr2)),
+                );
+                solver.assert(&Bool::or(
+                    &context,
+                    &[
+                        &bool._safe_eq(&Int::from_u64(&context, 1)).unwrap(),
+                        &bool._safe_eq(&Int::from_u64(&context, 0)).unwrap(),
+                    ],
+                ));
+            }
+            let sum_coales_bools = coalescable_bools
+                .iter()
+                .fold(Int::from_u64(&context, 0), |sum, next| sum + next);
+
             let max = Int::from_u64(&context, max_colors as u64);
             let min = Int::from_u64(&context, 0);
             for node in nodes_z3.iter().chain(nodes_native_regs.iter()) {
@@ -421,8 +451,8 @@ strict graph G {{
                     solver.assert(&nodes_z3[n1]._safe_eq(&nodes_z3[n2]).unwrap().not());
                 }
             }
-
-            if !matches!(solver.check(), z3::SatResult::Sat) {
+            solver.maximize(&sum_coales_bools);
+            if !matches!(solver.check(&[]), z3::SatResult::Sat) {
                 return Err(());
             }
             let model = solver.get_model().unwrap();
@@ -435,8 +465,16 @@ strict graph G {{
                 .iter()
                 .map(|(k, v)| (colors[self.index[k]], v.clone()))
                 .collect();
+            let coalesced = coalescable_bools
+                .into_iter()
+                .enumerate()
+                .filter(|(i, v)| model.eval(v, true).unwrap().as_u64().unwrap() == 1)
+                .map(|(i, _)| coalescable_vec[i])
+                .collect();
 
-            R::from_colors(&colors, &color_pins).map_err(|_| ())
+            R::from_colors(&colors, &color_pins)
+                .map_err(|_| ())
+                .map(|r| (r, coalesced))
         }
     }
 
@@ -492,6 +530,7 @@ strict graph G {{
                     *spill_weights.entry(live).or_insert(0_usize) += 1;
                 }
                 if let Some(rec) = op.receiver() {
+                    graph.maybe_insert(rec);
                     live_now.remove(&rec);
                     if let Operator::Mv(lr1, lr2) = op {
                         coalescable.insert((*lr1, *lr2));
@@ -641,81 +680,52 @@ strict graph G {{
     }
     impl RISCV64 {
         //todo refactor some general fns out of RV64
-        fn pin_liveranges(cfg: &mut CFG<Operator>) -> (HashMap<VReg, RV64Reg>, bool) {
-            let mut spilled = false;
+        fn pin_liveranges(cfg: &mut CFG<Operator>) -> HashMap<VReg, RV64Reg> {
             let mut gen = VRegGenerator::starting_at_reg(cfg.get_max_reg());
             let mut res = HashMap::new();
             for block in cfg.get_blocks_mut() {
                 let mut i = 0;
                 while i < block.body.len() {
                     match &mut block.body[i] {
-                        Operator::GetParameter(x, n) => {
+                        Operator::GetParameter(x, n) if !res.contains_key(x) => {
                             let pin = RV64Reg::get_param_reg(*n).unwrap();
-                            if let Some(pinned) = res.get(x) {
-                                if pinned != &pin {
-                                    spilled = true;
-                                    let next = gen.next_reg();
-                                    let old = *x;
-                                    *x = next;
-                                    block.body.insert(i + 1, Operator::Mv(old, next));
-                                    res.insert(next, pin);
-                                }
-                            } else {
-                                res.insert(*x, pin);
-                            }
+                            let next = gen.next_reg();
+                            let old = *x;
+                            *x = next;
+                            block.body.insert(i + 1, Operator::Mv(old, next));
+                            res.insert(next, pin);
                         }
-                        Operator::Call(rec, _, ops) => {
+                        Operator::Call(rec, _, ops) if !res.contains_key(rec) => {
                             let pin = RV64Reg::get_param_reg(0).unwrap();
                             let mut post = None;
-                            let mut before = None;
-                            if let Some(pinned) = res.get(rec) {
-                                if pinned != &pin {
-                                    spilled = true;
-                                    let next = gen.next_reg();
-                                    let old = *rec;
-                                    *rec = next;
-                                    post = Some(Operator::Mv(old, next));
-                                    res.insert(next, pin);
-                                }
-                            } else {
-                                res.insert(*rec, pin);
-                            }
+                            let mut before = Vec::new();
+                            let next = gen.next_reg();
+                            let old = *rec;
+                            *rec = next;
+                            post = Some(Operator::Mv(old, next));
+                            res.insert(next, pin);
                             for (i, op) in ops.iter_mut().enumerate() {
                                 let pin = RV64Reg::get_param_reg(i as u64).unwrap();
-                                if let Some(pinned) = res.get(op) {
-                                    if pinned != &pin {
-                                        spilled = true;
-                                        let next = gen.next_reg();
-                                        let old = *op;
-                                        *op = next;
-                                        before = Some(Operator::Mv(next, old));
-                                        res.insert(next, pin);
-                                    }
-                                } else {
-                                    res.insert(*op, pin);
-                                }
+                                let next = gen.next_reg();
+                                let old = *op;
+                                *op = next;
+                                before.push(Operator::Mv(next, old));
+                                res.insert(next, pin);
                             }
                             if let Some(operation) = post {
                                 block.body.insert(i + 1, operation)
                             }
-                            if let Some(operation) = before {
+                            for operation in before {
                                 block.body.insert(i, operation)
                             }
                         }
-                        Operator::Return(op) => {
+                        Operator::Return(op) if !res.contains_key(op) => {
                             let pin = RV64Reg::get_param_reg(0).unwrap();
-                            if let Some(pinned) = res.get(op) {
-                                if pinned != &pin {
-                                    spilled = true;
-                                    let next = gen.next_reg();
-                                    let old = *op;
-                                    *op = next;
-                                    block.body.insert(i + 1, Operator::Mv(old, next));
-                                    res.insert(next, pin);
-                                }
-                            } else {
-                                res.insert(*op, pin);
-                            }
+                            let next = gen.next_reg();
+                            let old = *op;
+                            *op = next;
+                            block.body.insert(i, Operator::Mv(next, old));
+                            res.insert(next, pin);
                         }
                         _ => {}
                     }
@@ -723,7 +733,7 @@ strict graph G {{
                 }
             }
             cfg.set_max_reg(gen.next_reg());
-            (res, spilled)
+            res
         }
     }
 
@@ -732,79 +742,73 @@ strict graph G {{
             let mut lr_cfg = rewrite_liveranges(ssa);
 
             let (graph, coloring) = 'build_allocate: loop {
-                let (mut graph, coalescable, mut spill_weights) = build_interference_graph(&lr_cfg);
-                // coalesce build loop
-                for (lr1, lr2) in coalescable.into_iter() {
-                    if graph.check_edge(&lr1, &lr2) {
-                        continue;
-                    } else {
-                        graph.merge(lr2, lr1);
-                        // todo make more efficient (i.e. all coalescing in one pass)
-                        for block in lr_cfg.get_blocks_mut() {
-                            let mut i = 0;
-                            while i < block.body.len() {
-                                if let Operator::Mv(left, right) = block.body[i] {
-                                    if left == lr1 && right == lr2 {
-                                        block.body.remove(i);
-                                        continue;
-                                    }
-                                }
-                                let op = &mut block.body[i];
-                                if let Some(rec) = op.receiver_mut() {
-                                    if *rec == lr1 {
-                                        *rec = lr2;
-                                    }
-                                }
-                                for op in op.dependencies_mut() {
-                                    if *op == lr1 {
-                                        *op = lr2;
-                                    }
-                                }
-                                i += 1;
-                            }
-                        }
-                        continue 'build_allocate;
-                    }
-                }
-                let (pins, rebuild_graph) = RISCV64::pin_liveranges(&mut lr_cfg);
-                if rebuild_graph {
-                    (graph, _, spill_weights) = build_interference_graph(&lr_cfg);
+                let (mut graph, mut coalescable, mut spill_weights) =
+                    build_interference_graph(&lr_cfg);
+                let mut pins = RISCV64::pin_liveranges(&mut lr_cfg);
+                if !pins.is_empty() {
+                    (graph, coalescable, spill_weights) = build_interference_graph(&lr_cfg);
                 }
                 for lr in pins.keys() {
                     graph.maybe_insert(*lr);
                 }
-                for (reg1, value1) in &pins {
-                    for (reg2, value2) in &pins {
-                        if value1 == value2
-                            && graph
-                                .get(reg1)
-                                .and_then(|n1| {
-                                    graph.index.get(reg2).map(|i2| n1.edge_with.contains(i2))
-                                })
-                                .unwrap_or(false)
-                        {
+                println!("post pinning: {}", lr_cfg.to_dot());
+                loop {
+                    match graph.find_coloring(&pins, coalescable) {
+                        Err(_) => {
+                            println!("conflict! {}", lr_cfg.to_dot());
+                            let lr_to_spill = graph
+                                .nodes
+                                .iter()
+                                .max_by_key(|node| spill_weights[&node.live_range])
+                                .unwrap()
+                                .live_range;
                             let ar = *lr_cfg.get_allocated_ars_mut();
-                            let to_spill = max_by_key(reg1, reg2, |&t| spill_weights[t]);
-                            spill_liverange(&mut lr_cfg, *to_spill, ar);
+                            spill_liverange(&mut lr_cfg, lr_to_spill, ar);
                             *lr_cfg.get_allocated_ars_mut() += 1;
                             continue 'build_allocate;
                         }
+                        Ok((coloring, coalesced)) => {
+                            let empty = coalesced.is_empty();
+                            for (lr1, lr2) in coalesced {
+                                if let Some(pin) = pins.get(&lr1) {
+                                    debug_assert!(
+                                        pins.get(&lr2).is_none() || pins.get(&lr2).unwrap() == pin
+                                    );
+                                    pins.insert(lr2, *pin);
+                                    pins.remove(&lr1);
+                                }
+                                for block in lr_cfg.get_blocks_mut() {
+                                    let mut i = 0;
+                                    while i < block.body.len() {
+                                        if let Operator::Mv(left, right) = block.body[i] {
+                                            if left == lr1 && right == lr2 {
+                                                block.body.remove(i);
+                                                continue;
+                                            }
+                                        }
+                                        let op = &mut block.body[i];
+                                        if let Some(rec) = op.receiver_mut() {
+                                            if *rec == lr1 {
+                                                *rec = lr2;
+                                            }
+                                        }
+                                        for op in op.dependencies_mut() {
+                                            if *op == lr1 {
+                                                *op = lr2;
+                                            }
+                                        }
+                                        i += 1;
+                                    }
+                                }
+                            }
+                            if empty {
+                                break 'build_allocate (graph, coloring);
+                            } else {
+                                (graph, coalescable, spill_weights) =
+                                    build_interference_graph(&lr_cfg);
+                            }
+                        }
                     }
-                }
-                match graph.find_coloring(&pins) {
-                    Err(_) => {
-                        println!("conflict! {}", lr_cfg.to_dot());
-                        let lr_to_spill = graph
-                            .nodes
-                            .iter()
-                            .max_by_key(|node| spill_weights[&node.live_range])
-                            .unwrap()
-                            .live_range;
-                        let ar = *lr_cfg.get_allocated_ars_mut();
-                        spill_liverange(&mut lr_cfg, lr_to_spill, ar);
-                        *lr_cfg.get_allocated_ars_mut() += 1;
-                    }
-                    Ok(coloring) => break (graph, coloring),
                 }
             };
 
@@ -942,15 +946,15 @@ strict graph G {{
 
             let cfg = super::rewrite_liveranges(ssa);
             println!("live ranges: {}", cfg.to_dot());
-            let (graph, _, _) = super::build_interference_graph(&cfg);
+            let (graph, coalescable, _) = super::build_interference_graph(&cfg);
 
             println!("{}", graph.to_dot());
 
-            let coloring = graph.find_coloring::<RV64Reg>(&HashMap::default());
+            let coloring = graph.find_coloring::<RV64Reg>(&HashMap::default(), coalescable);
             assert!(coloring.is_ok());
             println!(
                 "found coloring:\n{}",
-                graph.to_dot_colored(Some(coloring.unwrap()))
+                graph.to_dot_colored(Some(coloring.unwrap().0))
             );
         }
         #[test]
@@ -1028,50 +1032,52 @@ strict graph G {{
             println!("allocation: {:?}", allocation.1);
             println!("allocated_graph: {}", allocation.0.to_dot());
         }
-        #[test]
-        fn allocate_program_calls_spill() {
-            let input = "
-        myvar3 :: Bool = false;
-        lambda myfun(myvar3 :: Int, myvar5 :: Int) :: Int {
-            myvar4 :: Int = 0;
-            i :: Int = 100;
-            while (i >= 0) do {
-                myvar4 = myfun(3, myvar4);
-                i = i - 1;
-            }
-           return myvar4;
-        }
-        myvar2 :: Bool = true;
-        ";
+        // not spilling anymore after better coalescing
+        //     #[test]
+        // fn allocate_program_calls_spill() {
+        //     let input = "
+        // myvar3 :: Bool = false;
+        // lambda myfun(myvar3 :: Int, myvar5 :: Int) :: Int {
+        //     myvar4 :: Int = 0;
+        //     i :: Int = 100;
+        //     while (i >= 0) do {
+        //         myvar4 = myfun(3, myvar4);
+        //         i = i - 1;
+        //     }
+        //    return myvar4;
+        // }
+        // myvar2 :: Bool = true;
+        // ";
 
-            let p = parser::parse_and_validate(&input).unwrap();
-            let mut context = crate::ir::Context::new();
-            crate::ir::translate_program(&mut context, &p);
-            let funs = context.get_functions();
-            let fun = funs.get("myfun").unwrap();
-            let body = fun.get_body();
+        //     let p = parser::parse_and_validate(&input).unwrap();
+        //     let mut context = crate::ir::Context::new();
+        //     crate::ir::translate_program(&mut context, &p);
+        //     let funs = context.get_functions();
+        //     let fun = funs.get("myfun").unwrap();
+        //     let body = fun.get_body();
 
-            let cfg = CFG::from_linear(body, fun.get_params(), fun.get_max_reg());
-            let mut ssa = cfg.into_ssa();
-            crate::ssa::optimization_sequence(&mut ssa).unwrap();
-            super::conventionalize_ssa(&mut ssa);
+        //     let cfg = CFG::from_linear(body, fun.get_params(), fun.get_max_reg());
+        //     let mut ssa = cfg.into_ssa();
+        //     crate::ssa::optimization_sequence(&mut ssa).unwrap();
+        //     super::conventionalize_ssa(&mut ssa);
 
-            let allocation = super::RISCV64::allocate(ssa);
-            assert_eq!(
-                &allocation.0.blocks[3].body[0..=2],
-                &[
-                    Operator::LoadLocal(11, 0),
-                    Operator::Call(10, "myfun".into(), vec![10, 11]),
-                    Operator::StoreLocal(10, 0)
-                ]
-            );
-            assert_eq!(
-                allocation.0.blocks[0].body[0],
-                Operator::GetParameter(10, 0)
-            );
-            println!("allocation: {:?}", allocation.1);
-            println!("allocated_graph: {}", allocation.0.to_dot());
-        }
+        //     let allocation = super::RISCV64::allocate(ssa);
+        //     println!("allocated: {}", allocation.0.to_dot());
+        //     assert_eq!(
+        //         &allocation.0.blocks[3].body[0..=2],
+        //         &[
+        //             Operator::LoadLocal(11, 0),
+        //             Operator::Call(10, "myfun".into(), vec![10, 11]),
+        //             Operator::StoreLocal(10, 0)
+        //         ]
+        //     );
+        //     assert_eq!(
+        //         allocation.0.blocks[0].body[0],
+        //         Operator::GetParameter(10, 0)
+        //     );
+        //     println!("allocation: {:?}", allocation.1);
+        //     println!("allocated_graph: {}", allocation.0.to_dot());
+        // }
         #[test]
         fn program_calls_spill_prologues() {
             let input = "
@@ -1303,7 +1309,7 @@ mod instruction_selection {
                         unreachable!("label should be excluded in CFG");
                         #[cfg(not(debug_assertions))]
                         unsafe {
-                            unreachable_unchecked()
+                            std::hint::unreachable_unchecked()
                         }
                     }
                     Operator::GetParameter(_, _) => {
