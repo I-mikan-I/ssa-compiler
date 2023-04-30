@@ -18,7 +18,7 @@ fn validate(program: &parser_defs::Program) -> Option<Box<dyn Error>> {
 
 enum ResolutionState<'a> {
     Variable(Type),
-    Function(&'a [Parameter], Type),
+    Function(&'a [Parameter], Type, bool),
 }
 
 fn resolution<'a, 'b>(
@@ -80,7 +80,7 @@ where
             }
             parser_defs::Statement::Return(e) => {
                 let tr = resolution(Any::E(e), state)?;
-                if let Some(ResolutionState::Function(_, t)) = state.get("0CUR_FUN") {
+                if let Some(ResolutionState::Function(_, t, _)) = state.get("0CUR_FUN") {
                     if *t == tr {
                         return Ok(Type::Never);
                     }
@@ -89,7 +89,7 @@ where
             }
         },
         parser_defs::Any::D(d) => match d {
-            parser_defs::Defs::VarDef(i, t, e) => {
+            parser_defs::Defs::LocalVarDef(i, t, e) => {
                 if state.get(i.as_str()).is_some() {
                     Err(format!("Dual declaration for {i}").into())
                 } else {
@@ -101,18 +101,53 @@ where
                     Ok(Never)
                 }
             }
-            parser_defs::Defs::FunctionDef(i, Params(vec), t, b) => {
+            parser_defs::Defs::GlobalDecl(i, t) => {
                 if state.get(i.as_str()).is_some() {
-                    return Err(format!("Dual declaration for {i}").into());
+                    Err(format!("Dual declaration for {i}").into())
+                } else {
+                    state.insert(i, ResolutionState::Variable(*t));
+                    Ok(Never)
                 }
-                state.insert(i, ResolutionState::Function(vec.as_slice(), *t));
+            }
+            parser_defs::Defs::FunctionDef(i, Params(vec), t, b) => {
+                match state.get(i.as_str()) {
+                    Some(ResolutionState::Variable(..)) => {
+                        return Err(format!(
+                            "Trying to define a function for declared variable {i}"
+                        )
+                        .into())
+                    }
+                    Some(ResolutionState::Function(args, ty, d)) => {
+                        if *args != vec.as_slice() || t != ty {
+                            return Err(format!(
+                                "Trying to define function with non-matching signature {i}"
+                            )
+                            .into());
+                        } else if *d {
+                            return Err(format!("Dual definition for function {i}").into());
+                        }
+                        state.remove(i.as_str());
+                    }
+                    None => {}
+                }
+                state.insert(i, ResolutionState::Function(vec.as_slice(), *t, true));
                 state.push();
-                state.insert("0CUR_FUN", ResolutionState::Function(vec.as_slice(), *t));
+                state.insert(
+                    "0CUR_FUN",
+                    ResolutionState::Function(vec.as_slice(), *t, true),
+                );
                 for p in vec {
                     state.insert(&p.0, ResolutionState::Variable(p.1));
                 }
                 resolution(Any::B(b), state)?;
                 state.pop();
+                Ok(Never)
+            }
+            parser_defs::Defs::FunctionDecl(i, Params(vec), t) => {
+                if state.get(i.as_str()).is_some() {
+                    return Err(format!("Dual declaration for {i}").into());
+                }
+                state.insert(i, ResolutionState::Function(vec.as_slice(), *t, false));
                 Ok(Never)
             }
         },
@@ -142,7 +177,7 @@ where
                 }
             }
             parser_defs::Unit::Call(i, a) => {
-                if let Some(ResolutionState::Function(p, t)) = state.get(i.as_str()) {
+                if let Some(ResolutionState::Function(p, t, ..)) = state.get(i.as_str()) {
                     let t = *t;
                     if p.len() == a.0.len() {
                         a.0.iter()
@@ -222,12 +257,17 @@ where
             parser_defs::BTerm::BCTerm(ct) => resolution(Any::CT(ct), state),
         },
         parser_defs::Any::PR(Program(defs)) => {
-            for v in defs.iter().filter(|&d| matches!(d, Defs::VarDef(_, _, _))) {
+            for v in defs.iter().filter(|&d| matches!(d, Defs::GlobalDecl(..))) {
                 resolution(Any::D(v), state)?;
             }
             for f in defs.iter() {
-                if let Defs::FunctionDef(ident, params, t, ..) = f {
-                    state.insert(ident.as_str(), ResolutionState::Function(&params.0[..], *t));
+                if let Defs::FunctionDef(ident, params, t, ..)
+                | Defs::FunctionDecl(ident, params, t) = f
+                {
+                    state.insert(
+                        ident.as_str(),
+                        ResolutionState::Function(&params.0[..], *t, false),
+                    );
                 }
             }
             for f in defs.iter() {
@@ -235,7 +275,7 @@ where
                     state.push();
                     state.insert(
                         "0CUR_FUN",
-                        ResolutionState::Function(params.0.as_slice(), *t),
+                        ResolutionState::Function(params.0.as_slice(), *t, true),
                     );
                     for p in &params.0 {
                         state.insert(&p.0, ResolutionState::Variable(p.1));
@@ -329,7 +369,6 @@ mod tests {
         wrong1,
         wrong_type1,
         wrong2,
-        wrong_type2,
         wrong_type3,
         wrong_type4
     );

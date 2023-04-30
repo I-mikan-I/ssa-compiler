@@ -1,0 +1,10 @@
+mycounter :: Int;
+lambda init() :: Int {
+    mycounter = 0;
+    return 0;
+}
+lambda increment() :: Int {
+    result :: Int = mycounter;
+    mycounter = mycounter + 1;
+    return result;
+}

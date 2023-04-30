@@ -1,4 +1,7 @@
+use std::collections::HashMap;
+
 use crate::ir::{Displayable, SSAOperator, CFG};
+use parser_defs::Type;
 use register_allocation::Allocator;
 
 pub fn to_assembly(mut cfg: CFG<SSAOperator>, fun_name: &str) -> String {
@@ -10,15 +13,30 @@ pub fn to_assembly(mut cfg: CFG<SSAOperator>, fun_name: &str) -> String {
     let native = instruction_selection::select_instructions(cfg, &coloring);
     let linear = native.linearize();
     format!(
-        ".attribute arch, \"rv64im\"
+        ".attribute arch, \"rv64imd\"
 .globl {fun_name}
 {fun_name}:
 {}",
         Displayable(&linear)
     )
 }
+pub fn globals_to_assembly(globals: HashMap<String, Type>) -> String {
+    let names = globals
+        .keys()
+        .map(|key| format!(".globl {}\n", key))
+        .collect::<String>();
+    let asm = globals
+        .into_keys()
+        .map(|key| format!("{}: .dword 0\n", key))
+        .collect::<String>();
+    format!(
+        ".attribute arch, \"rv64imd\"
+{names}
+.section .data
+{asm}"
+    )
+}
 mod register_allocation {
-    use std::cmp::max_by_key;
     use std::collections::{HashMap, HashSet};
     use std::fmt::Display;
 
@@ -328,6 +346,9 @@ mod register_allocation {
         }
     }
 
+    /// ColoringResult::0 := Assigned registers (result[i] = r means live range at index graph.nodes[i] has register r).
+    /// ColoringResult::1 := Coalesced registers.
+    type ColoringResult<R> = (Vec<R>, HashSet<(VReg, VReg)>);
     impl InterferenceGraph {
         fn to_dot(&self) -> String {
             self.to_dot_colored::<RV64Reg>(None)
@@ -366,7 +387,7 @@ strict graph G {{
             &self,
             pins: &HashMap<VReg, R>,
             coalescable: HashSet<(VReg, VReg)>,
-        ) -> Result<(Vec<R>, HashSet<(VReg, VReg)>), ()> {
+        ) -> Result<ColoringResult<R>, ()> {
             use z3::ast::*;
             let max_colors = R::max_regs();
             let mut config = z3::Config::new();
@@ -417,7 +438,7 @@ strict graph G {{
                     &bool
                         ._safe_eq(&Int::from_u64(&context, 1))
                         .unwrap()
-                        .implies(&lr1._eq(&lr2)),
+                        .implies(&lr1._eq(lr2)),
                 );
                 solver.assert(&Bool::or(
                     &context,
@@ -468,7 +489,7 @@ strict graph G {{
             let coalesced = coalescable_bools
                 .into_iter()
                 .enumerate()
-                .filter(|(i, v)| model.eval(v, true).unwrap().as_u64().unwrap() == 1)
+                .filter(|(_, v)| model.eval(v, true).unwrap().as_u64().unwrap() == 1)
                 .map(|(i, _)| coalescable_vec[i])
                 .collect();
 
@@ -697,12 +718,11 @@ strict graph G {{
                         }
                         Operator::Call(rec, _, ops) if !res.contains_key(rec) => {
                             let pin = RV64Reg::get_param_reg(0).unwrap();
-                            let mut post = None;
                             let mut before = Vec::new();
                             let next = gen.next_reg();
                             let old = *rec;
                             *rec = next;
-                            post = Some(Operator::Mv(old, next));
+                            let post = Some(Operator::Mv(old, next));
                             res.insert(next, pin);
                             for (i, op) in ops.iter_mut().enumerate() {
                                 let pin = RV64Reg::get_param_reg(i as u64).unwrap();
@@ -751,7 +771,6 @@ strict graph G {{
                 for lr in pins.keys() {
                     graph.maybe_insert(*lr);
                 }
-                println!("post pinning: {}", lr_cfg.to_dot());
                 loop {
                     match graph.find_coloring(&pins, coalescable) {
                         Err(_) => {
@@ -915,7 +934,7 @@ strict graph G {{
         #[test]
         fn construct_graph() {
             let input = "
-        myvar3 :: Bool = false;
+        myvar3 :: Bool;
         lambda myfun(myvar3 :: Int) :: Int {
             myvar4 :: Int = 0;
             i :: Int = 100;
@@ -929,9 +948,9 @@ strict graph G {{
             }
            return myvar4;
         }
-        myvar2 :: Bool = true;
+        myvar2 :: Bool;
         ";
-            let p = parser::parse_and_validate(&input).unwrap();
+            let p = parser::parse_and_validate(input).unwrap();
             let mut context = crate::ir::Context::new();
             crate::ir::translate_program(&mut context, &p);
             let funs = context.get_functions();
@@ -960,7 +979,7 @@ strict graph G {{
         #[test]
         fn allocate_program() {
             let input = "
-        myvar3 :: Bool = false;
+        myvar3 :: Bool;
         lambda myfun(myvar3 :: Int) :: Int {
             myvar4 :: Int = 0;
             i :: Int = 100;
@@ -974,9 +993,9 @@ strict graph G {{
             }
            return myvar4;
         }
-        myvar2 :: Bool = true;
+        myvar2 :: Bool;
         ";
-            let p = parser::parse_and_validate(&input).unwrap();
+            let p = parser::parse_and_validate(input).unwrap();
             let mut context = crate::ir::Context::new();
             crate::ir::translate_program(&mut context, &p);
             let funs = context.get_functions();
@@ -995,7 +1014,7 @@ strict graph G {{
         #[test]
         fn allocate_program_calls_no_spill() {
             let input = "
-        myvar3 :: Bool = false;
+        myvar3 :: Bool;
         lambda myfun(myvar3 :: Int) :: Int {
             myvar4 :: Int = 0;
             i :: Int = 100;
@@ -1005,9 +1024,9 @@ strict graph G {{
             }
            return myvar4;
         }
-        myvar2 :: Bool = true;
+        myvar2 :: Bool;
         ";
-            let p = parser::parse_and_validate(&input).unwrap();
+            let p = parser::parse_and_validate(input).unwrap();
             let mut context = crate::ir::Context::new();
             crate::ir::translate_program(&mut context, &p);
             let funs = context.get_functions();
@@ -1081,7 +1100,7 @@ strict graph G {{
         #[test]
         fn program_calls_spill_prologues() {
             let input = "
-        myvar3 :: Bool = false;
+        myvar3 :: Bool;
         lambda myfun(myvar3 :: Int, myvar5 :: Int) :: Int {
             myvar4 :: Int = 0;
             i :: Int = 100;
@@ -1091,10 +1110,10 @@ strict graph G {{
             }
            return myvar4;
         }
-        myvar2 :: Bool = true;
+        myvar2 :: Bool;
         ";
 
-            let p = parser::parse_and_validate(&input).unwrap();
+            let p = parser::parse_and_validate(input).unwrap();
             let mut context = crate::ir::Context::new();
             crate::ir::translate_program(&mut context, &p);
             let funs = context.get_functions();
@@ -1267,9 +1286,13 @@ mod instruction_selection {
                     }
                     Operator::Store(x, y, z) => {
                         let (x, y, z) = get_regs!(x, y, z);
-                        new_bodies[i].push(ADD(y, y, z));
-                        new_bodies[i].push(SQ(x, y, 0));
-                        new_bodies[i].push(SUB(y, y, z));
+                        assert!(
+                            x != z,
+                            "store: address register may not alias origina register"
+                        );
+                        new_bodies[i].push(ADD(z, z, y));
+                        new_bodies[i].push(SQ(x, z, 0));
+                        new_bodies[i].push(SUB(z, z, y));
                     }
                     Operator::La(x, y) => {
                         let x = get_regs!(x);
@@ -1375,7 +1398,7 @@ mod instruction_selection {
         #[test]
         fn select_instructions() {
             let input = "
-        myvar3 :: Bool = false;
+        myvar3 :: Bool;
         lambda myfun(myvar3 :: Int, myvar5 :: Int) :: Int {
             myvar4 :: Int = 0;
             i :: Int = 100;
@@ -1385,9 +1408,9 @@ mod instruction_selection {
             }
            return myvar4;
         }
-        myvar2 :: Bool = true;
+        myvar2 :: Bool;
         ";
-            let p = parser::parse_and_validate(&input).unwrap();
+            let p = parser::parse_and_validate(input).unwrap();
             let mut context = crate::ir::Context::new();
             crate::ir::translate_program(&mut context, &p);
             let funs = context.get_functions();
@@ -1416,7 +1439,7 @@ lambda fib(n :: Int) :: Int {
     return fib(n - 2) + fib(n - 1);
 }
         ";
-            let p = parser::parse_and_validate(&input).unwrap();
+            let p = parser::parse_and_validate(input).unwrap();
             let mut context = crate::ir::Context::new();
             crate::ir::translate_program(&mut context, &p);
             let funs = context.get_functions();

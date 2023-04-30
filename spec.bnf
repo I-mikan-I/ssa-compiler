@@ -1,6 +1,8 @@
-program = { var_def | function_def } ;
+program = { global_decl | function_def | function_decl } ;
 
 var_def = identifier "::" type "=" expr ;
+global_decl = identifier "::" type ;
+function_decl = "lambda " identifier parameter_list :: type ;
 
 number = ["-"] digit { digit } ;
 digit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;

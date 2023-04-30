@@ -1,0 +1,7 @@
+lambda increment() :: Int ;
+mycounter :: Int;
+lambda incrtwice() :: Int {
+    unused :: Int = increment();
+    unused = increment();
+    return mycounter + 1;
+}

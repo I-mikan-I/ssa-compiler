@@ -718,7 +718,7 @@ pub mod gvn_pre {
         #[test]
         fn generate_table() {
             let input = "
-        myvar3 :: Bool = false;
+        myvar3 :: Bool;
         lambda myfun(myvar3 :: Int) :: Int {
             myvar4 :: Int = 0;
             i :: Int = 100;
@@ -731,10 +731,10 @@ pub mod gvn_pre {
             }
            return myvar4;
         }
-        myvar2 :: Bool = true;
+        myvar2 :: Bool;
         ";
 
-            let p = parser::parse_and_validate(&input).unwrap();
+            let p = parser::parse_and_validate(input).unwrap();
             let mut context = crate::ir::Context::new();
             crate::ir::translate_program(&mut context, &p);
             let funs = context.get_functions();
@@ -1693,7 +1693,7 @@ mod tests {
     #[test]
     fn optimize_with_call() {
         let input = "
-        myvar3 :: Bool = false;
+        myvar3 :: Bool;
         lambda myfun(myvar3 :: Int) :: Int {
             myvar4 :: Int = 0;
             i :: Int = 100;
@@ -1703,9 +1703,9 @@ mod tests {
             }
            return myvar4;
         }
-        myvar2 :: Bool = true;
+        myvar2 :: Bool;
         ";
-        let p = parser::parse_and_validate(&input).unwrap();
+        let p = parser::parse_and_validate(input).unwrap();
         let mut context = crate::ir::Context::new();
         crate::ir::translate_program(&mut context, &p);
         let funs = context.get_functions();

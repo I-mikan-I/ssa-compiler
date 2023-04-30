@@ -1,4 +1,4 @@
-myvar3 :: Bool = false;
+myvar3 :: Bool;
 lambda myfun(myvar3 :: Int) :: Int {
     myvar4 :: Int = 0;
     i :: Int = 100;
@@ -11,4 +11,4 @@ lambda myfun(myvar3 :: Int) :: Int {
     }
     return myvar4;
 }
-myvar2 :: Bool = true;
+myvar2 :: Bool;

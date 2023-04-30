@@ -126,7 +126,7 @@ Type -> Result<Type, ParseErr> :
     } ;
 VarDef -> Result<Defs, ParseErr> :
     Identifier '::' Type '=' Expr ';' {
-        Ok(VarDef($1?, $3?, $5?))
+        Ok(LocalVarDef($1?, $3?, $5?))
     } ;
 Body -> Result<Body, ParseErr> :
     '{' '}' {
@@ -160,14 +160,28 @@ FunctionDef -> Result<Defs, ParseErr> :
     'LAMBDA' Identifier Parameters '::' Type Body {
         Ok(FunctionDef($2?, $3?, $5?, $6?))
     } ;
+FunctionDecl -> Result<Defs, ParseErr> :
+    'LAMBDA' Identifier Parameters '::' Type ';' {
+        Ok(FunctionDecl($2?, $3?, $5?))
+    } ;
+GlobalDecl -> Result<Defs, ParseErr> :
+    Identifier '::' Type ';' {
+        Ok(GlobalDecl($1?, $3?))
+    } ;
 DefList -> Result<Vec<Defs>, ParseErr> :
-    VarDef {
+    GlobalDecl {
         Ok(vec![$1?])
     }
     | FunctionDef {
         Ok(vec![$1?])
     }
-    | DefList VarDef {
+    | FunctionDecl {
+        Ok(vec![$1?])
+    }
+    | DefList FunctionDecl {
+        append($1, $2)
+    }
+    | DefList GlobalDecl {
         append($1, $2)
     }
     | DefList FunctionDef {

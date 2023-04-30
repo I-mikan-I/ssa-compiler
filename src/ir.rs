@@ -61,6 +61,9 @@
 //! number =>       li name() number
 //! ident = (R)     mv name() lin(R)
 //! ident           name(ident) // reuse register
+//! global          la name() global
+//! global = (R)    la name() global // r_new
+//!                 store lin(R) 0 r_new
 //! if (C) then (I)
 //! else (E) =>     li name() 1 // r_new
 //!                 beq lin(C) r_new @l1 @l2
@@ -89,7 +92,7 @@
 //!
 //! ```
 
-use parser_defs::Any;
+use parser_defs::{Any, Type};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     fmt::Display,
@@ -405,11 +408,13 @@ impl Function<CFG<Operator>> {
 }
 pub struct Context<B> {
     pub functions: HashMap<String, Function<B>>,
+    pub globals: HashMap<String, Type>,
 }
 impl<B> Context<B> {
     pub fn new() -> Self {
         Self {
             functions: HashMap::new(),
+            globals: HashMap::new(),
         }
     }
     pub fn get_functions(&self) -> &HashMap<String, Function<B>> {
@@ -431,18 +436,26 @@ pub fn translate_program(context: &mut Context<Vec<Operator>>, program: &parser_
     let defs = &program.0;
     let mut scope = SheafTable::new();
     for g in defs {
-        if let parser_defs::VarDef(i, ..) = g {
-            scope.insert(i.as_str().into(), Scope::Global);
-        }
-        if let parser_defs::FunctionDef(i, ..) = g {
+        if let parser_defs::GlobalDecl(i, ..)
+        | parser_defs::FunctionDecl(i, ..)
+        | parser_defs::FunctionDef(i, ..) = g
+        {
             scope.insert(i.as_str().into(), Scope::Global);
         }
     }
     for f in defs {
-        if let parser_defs::FunctionDef(..) = f {
-            scope.push();
-            translate_function(context, &mut scope, f, VRegGenerator::new());
-            scope.pop();
+        match f {
+            parser_defs::FunctionDef(..) => {
+                scope.push();
+                translate_function(context, &mut scope, f, VRegGenerator::new());
+                scope.pop();
+            }
+            parser_defs::FunctionDecl(..) => {}
+            parser_defs::GlobalDecl(ident, t) => {
+                debug_assert!(!context.globals.contains_key(ident));
+                context.globals.insert(ident.clone(), *t);
+            }
+            parser_defs::LocalVarDef(..) => panic!("local var def at global scope"),
         }
     }
 }
@@ -564,12 +577,14 @@ fn translate_block(
             }
         },
         Any::D(def) => match def {
-            parser_defs::Defs::VarDef(i, _, e) => {
+            parser_defs::Defs::LocalVarDef(i, _, e) => {
                 let res = translate_block(vec, scope, Any::E(e), gen).unwrap();
                 scope.insert(i.as_str().into(), Scope::Local(res));
                 Some(res)
             }
+            parser_defs::Defs::GlobalDecl(..) => panic!("Nested global decl"),
             parser_defs::Defs::FunctionDef(..) => panic!("Nested function def"),
+            parser_defs::Defs::FunctionDecl(..) => panic!("Nested function decl"),
         },
         Any::B(parser_defs::Body(v)) => {
             for v in v {
@@ -1273,12 +1288,16 @@ impl CFG<Operator> {
                 | Operator::Xor(x, y, z)
                 | Operator::Slt(x, y, z)
                 | Operator::Load(x, y, z)
-                | Operator::Store(x, y, z)
                 | Operator::And(x, y, z)
                 | Operator::Or(x, y, z) => {
                     update_name!(y);
                     update_name!(z);
                     set_name!(x);
+                }
+                Operator::Store(x, y, z) => {
+                    update_name!(x);
+                    update_name!(y);
+                    update_name!(z);
                 }
                 Operator::LoadLocal(x, _)
                 | Operator::Li(x, _)
@@ -1682,7 +1701,7 @@ mod test {
             Operator::Nop,
             Operator::Return(2),
         ];
-        let output = CFG::from_linear(input, &[], 2);
+        let output = CFG::from_linear(input, [], 2);
         println!("{output:?}")
     }
 
@@ -1707,7 +1726,7 @@ mod test {
             Operator::Label(Rc::clone(&l3)),
             Operator::Return(2),
         ];
-        let output = CFG::from_linear(input, &[], 2);
+        let output = CFG::from_linear(input, [], 2);
         assert_eq!(output.blocks[0].children.len(), 1);
         assert_eq!(output.blocks[1].children.len(), 2);
         assert_eq!(output.blocks[2].children.len(), 1);
@@ -1740,7 +1759,7 @@ mod test {
             Operator::Label(Rc::clone(&l2)),
             Operator::Nop,
         ];
-        let output = CFG::from_linear(input, &[], 34);
+        let output = CFG::from_linear(input, [], 34);
         assert_eq!(output.blocks[0].children.len(), 1);
         assert_eq!(output.blocks[1].children.len(), 2);
         assert_eq!(output.blocks[2].children.len(), 1);
@@ -1775,7 +1794,7 @@ mod test {
         fn test_correct_labels(cfg in any_with::<CFG<Operator>>((20, 20, 20))) {
             for block in &cfg.blocks {
                 if let Some(Operator::Bgt(_, _, s1, s2) | Operator::Bl(_, _, s1, s2) | Operator::Beq(_, _, s1, s2)) = block.body.last() {
-                    assert!(block.children.len() <= 2 && block.children.len() >= 1, "{}", cfg.to_dot());
+                    assert!(block.children.len() <= 2 && !block.children.is_empty(), "{}", cfg.to_dot());
                     for &child in &block.children {
                         let child = &cfg.blocks[child];
                         assert!(child.label == *s1 || child.label == *s2);
@@ -1806,7 +1825,6 @@ mod test {
                             Operator::Mv(x, _)  |
                             Operator::Xor(x, _, _)  |
                             Operator::Load(x, _, _)  |
-                            Operator::Store(x, _, _)  |
                             Operator::La(x, _)  |
                             Operator::LoadLocal(x, _) |
                             Operator::Li(x, _)  |
@@ -1950,10 +1968,10 @@ mod test {
             Just(Operator::Slt(reg1, reg2, reg3)),
             Just(Operator::Store(reg1, reg2, reg3)),
             Just(Operator::Load(reg1, reg2, reg3)),
-            Just(Operator::Load(reg1, reg2, reg3)),
-            Just(Operator::Load(reg1, reg2, reg3)),
             Just(Operator::Mv(reg1, reg2)),
             any::<i64>().prop_map(move |i| Operator::Li(reg1, i)),
+            any::<u64>().prop_map(move |i| Operator::LoadLocal(reg1, i)),
+            any::<u64>().prop_map(move |i| Operator::StoreLocal(reg1, i)),
         ]
     }
 

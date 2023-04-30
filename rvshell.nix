@@ -9,13 +9,10 @@ let
         meta = oldAttrs.meta // {outputsToInstall = [ "dev" ]; };
     });
 in
-pkgs.callPackage (
-    {mkShell}:
+rv64.callPackage (
+    {mkShell, stdenv, gcc}:
     mkShell {
-        buildInputs = [ pkgs.llvmPackages.libclang pkgs.stdenv z3.dev];
-        nativeBuildInputs = [ pkgs.cmake pkgs.clang pkgs.stdenv ];
-        shellHook = "
-            export LIBCLANG_PATH=${pkgs.llvmPackages.libclang.lib}/lib
-        ";
+        buildInputs = [ stdenv ];
+        nativeBuildInputs = [ gcc ];
     }
 ) {}

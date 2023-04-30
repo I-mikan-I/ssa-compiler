@@ -91,9 +91,9 @@ pub enum Unit {
     Number(i64),
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct Parameter(pub Ident, pub Type);
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct Params(pub Vec<Parameter>);
 #[derive(Debug)]
 pub struct Args(pub Vec<Expr>);
@@ -109,8 +109,10 @@ pub enum Statement {
 }
 #[derive(Debug)]
 pub enum Defs {
-    VarDef(Ident, Type, Expr),
+    LocalVarDef(Ident, Type, Expr),
+    GlobalDecl(Ident, Type),
     FunctionDef(Ident, Params, Type, Body),
+    FunctionDecl(Ident, Params, Type),
 }
 #[derive(Debug)]
 pub struct Program(pub Vec<Defs>);

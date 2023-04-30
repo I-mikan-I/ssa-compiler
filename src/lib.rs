@@ -9,13 +9,12 @@ use std::{collections::HashMap, error::Error, path::PathBuf};
 
 use clap::Parser;
 
-const TEMP_DIR: &str = "build";
 #[derive(Parser, Debug)]
 #[command(author, version, about)]
 struct Args {
     input_files: Vec<PathBuf>,
-    #[arg(short = 'o', long = "output")]
-    output_file: PathBuf,
+    #[arg(short = 'o', long = "outdir")]
+    output_dir: PathBuf,
     #[arg(short = 'g', long, default_value_t = false)]
     no_optimize: bool,
 }
@@ -26,6 +25,12 @@ pub fn lib_main() {
         eprintln!("Error during argument validation: {}", e);
         return;
     }
+    let outdir = if let Some(s) = args.output_dir.to_str() {
+        s
+    } else {
+        eprintln!("'outdir' parsing error");
+        return;
+    };
     let strings = args
         .input_files
         .iter()
@@ -50,15 +55,27 @@ pub fn lib_main() {
         eprintln!("Error during parsing: {e}");
         return;
     }
+    let mut globals = HashMap::new();
+    let mut dual = false;
     let linearized: Vec<_> = parsed
         .unwrap()
         .into_iter()
         .map(|p| {
             let mut ctx = ir::Context::default();
             ir::translate_program(&mut ctx, &p);
+            for (name, ty) in &ctx.globals {
+                if globals.get(name).map_or(false, |t| t != ty) {
+                    eprintln!("dual declaration with different types for {}.", name);
+                    dual = true;
+                }
+                globals.insert(name.clone(), *ty);
+            }
             ctx
         })
         .collect();
+    if dual {
+        return;
+    }
     let funs_iter = linearized
         .into_iter()
         .flat_map(|ctx| ctx.functions.into_iter());
@@ -82,12 +99,17 @@ pub fn lib_main() {
         (k, v)
     });
     for (name, body) in funs {
-        let out_path = format!("{TEMP_DIR}/{name}.s");
+        let out_path = format!("{outdir}/{name}.s");
         let res = std::fs::write(&out_path, body);
         if let Err(e) = res {
             eprintln!("Error writing output file: {out_path}\n{e}");
             return;
         }
+    }
+    let global_asm = backend::globals_to_assembly(globals);
+    let res = std::fs::write(format!("{outdir}/_globals.s"), global_asm);
+    if let Err(e) = res {
+        eprintln!("Error writing output file: {outdir}/_globals.s\n{e}");
     }
 }
 
@@ -111,7 +133,7 @@ mod tests {
     #[test]
     fn test_ir() {
         let input = "
-        myvar3 :: Bool = false;
+        myvar3 :: Bool;
         lambda myfun(myvar3 :: Int) :: Int {
             myvar4 :: Int = 0;
             if myvar2 then {
@@ -121,10 +143,10 @@ mod tests {
             }
             return myvar4;
         }
-        myvar2 :: Bool = true;
+        myvar2 :: Bool;
         ";
 
-        let p = super::parser::parse_and_validate(&input).unwrap();
+        let p = super::parser::parse_and_validate(input).unwrap();
 
         let mut context = Context::new();
         translate_program(&mut context, &p);
@@ -166,7 +188,7 @@ mod tests {
     #[test]
     fn test_cfg() {
         let input = "
-        myvar3 :: Bool = false;
+        myvar3 :: Bool;
         lambda myfun(myvar3 :: Int) :: Int {
             myvar4 :: Int = 0;
             i :: Int = 100;
@@ -179,10 +201,10 @@ mod tests {
             }
            return myvar4;
         }
-        myvar2 :: Bool = true;
+        myvar2 :: Bool;
         ";
 
-        let p = super::parser::parse_and_validate(&input).unwrap();
+        let p = super::parser::parse_and_validate(input).unwrap();
         let mut context = Context::new();
         translate_program(&mut context, &p);
         let funs = context.get_functions();
@@ -282,7 +304,7 @@ mod tests {
         }
         ";
 
-        let p = super::parser::parse_and_validate(&input).unwrap();
+        let p = super::parser::parse_and_validate(input).unwrap();
         let mut context = Context::new();
         translate_program(&mut context, &p);
         let funs = context.get_functions();
