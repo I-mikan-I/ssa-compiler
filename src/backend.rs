@@ -1398,7 +1398,7 @@ mod instruction_selection {
         };
 
         #[test]
-        fn select_instructions() {
+        fn select_instructions_loop() {
             let input = "
         myvar3 :: Bool;
         lambda myfun(myvar3 :: Int, myvar5 :: Int) :: Int {
