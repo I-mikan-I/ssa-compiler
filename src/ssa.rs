@@ -24,6 +24,10 @@ pub mod gvn_pre {
         let (mut leaders, antileaders, phigen, mut value_table) = build_sets(cfg);
         insert(cfg, &mut leaders, &antileaders, &phigen, &mut value_table);
         eliminate(cfg, &leaders, &mut value_table);
+        #[cfg(feature = "print-cfgs")]
+        {
+            println!("After gvn-pre:\n{}", cfg.to_dot());
+        }
     }
 
     type Value = usize;

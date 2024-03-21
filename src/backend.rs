@@ -591,9 +591,9 @@ strict graph G {{
         }
 
         for (i, mut copies) in parallel_copies.into_iter().enumerate() {
-            let len = ssa.get_block(i).body.len();
             // found copy to non-live name
             while !copies.is_empty() {
+                let len = ssa.get_block(i).body.len();
                 if let Some(op) = {
                     let mut choices = HashMap::new();
                     let mut iter = copies.iter().enumerate();
